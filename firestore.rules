@@ -1,0 +1,40 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function role() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    function isAuditor() {
+      return isSignedIn() && role() == 'auditor';
+    }
+
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      // Users can create/update their own profile; role escalation must be
+      // done by an auditor manually (or via a trusted server-side function).
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isAuditor() || (isSignedIn() && request.auth.uid == userId && request.resource.data.role == resource.data.role);
+    }
+
+    match /questions/{questionId} {
+      allow read: if isSignedIn();
+      allow write: if isAuditor();
+    }
+
+    match /exams/{examId} {
+      allow read: if isSignedIn();
+      allow write: if isAuditor();
+    }
+
+    match /attempts/{attemptId} {
+      allow read: if isSignedIn();
+      // Agents can create/update only their own attempts.
+      allow create: if isSignedIn() && request.resource.data.agentId == request.auth.uid;
+      allow update: if isAuditor() || (isSignedIn() && resource.data.agentId == request.auth.uid);
+    }
+  }
+}
