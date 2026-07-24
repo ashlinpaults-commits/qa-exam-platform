@@ -765,3 +765,472 @@ function round(value: number) {
     value * 10
   ) / 10;
 }
+/* =========================================================
+   COACHING PRIORITY ENGINE
+   ========================================================= */
+
+export type CoachingPriority =
+  | "high"
+  | "medium"
+  | "healthy"
+  | "insufficient_data";
+
+export interface CoachingSignal {
+  label: string;
+  detail: string;
+  severity: "high" | "medium" | "positive";
+}
+
+export interface AgentCoachingAssessment {
+  agentId: string;
+  agent?: AppUser;
+
+  priority: CoachingPriority;
+
+  /*
+   * Numeric score used ONLY for sorting coaching urgency.
+   * Higher = more attention required.
+   *
+   * This is NOT the agent's competency score.
+   */
+  priorityScore: number;
+
+  competencyScore: number | null;
+
+  weakestModule?: ModuleCompetency;
+
+  persistentGapCount: number;
+
+  learningTrend: LearningTrend;
+
+  learningVelocity: number | null;
+
+  reviewedAttempts: number;
+
+  totalAttempts: number;
+
+  signals: CoachingSignal[];
+
+  primaryReason: string;
+}
+
+/* =========================================================
+   COACHING SETTINGS
+
+   Keep these centralized so the model remains auditable.
+   ========================================================= */
+
+export const COACHING_THRESHOLDS = {
+  criticalCompetency: 60,
+
+  competencyThreshold: 70,
+
+  criticalModuleScore: 50,
+
+  weakModuleScore: 70,
+
+  highPersistentGaps: 3,
+
+  mediumPersistentGaps: 1,
+
+  significantDecline: -10,
+
+  repeatedAttemptThreshold: 3,
+} as const;
+
+/* =========================================================
+   CALCULATE COACHING PRIORITY FOR ONE AGENT
+   ========================================================= */
+
+export function calculateCoachingAssessment(
+  competency: AgentCompetency
+): AgentCoachingAssessment {
+  const signals: CoachingSignal[] = [];
+
+  let priorityScore = 0;
+
+  /*
+   * Do not classify an agent without reviewed competency data.
+   */
+  if (
+    competency.competencyScore === null ||
+    competency.reviewedAttempts === 0
+  ) {
+    return {
+      agentId: competency.agentId,
+      agent: competency.agent,
+
+      priority: "insufficient_data",
+
+      priorityScore: 0,
+
+      competencyScore:
+        competency.competencyScore,
+
+      weakestModule:
+        competency.weakestModule,
+
+      persistentGapCount:
+        competency.persistentGaps.length,
+
+      learningTrend:
+        competency.learningTrend,
+
+      learningVelocity:
+        competency.learningVelocity,
+
+      reviewedAttempts:
+        competency.reviewedAttempts,
+
+      totalAttempts:
+        competency.totalAttempts,
+
+      signals: [
+        {
+          label: "Insufficient data",
+          detail:
+            "At least one reviewed assessment is required before coaching priority can be determined.",
+          severity: "medium",
+        },
+      ],
+
+      primaryReason:
+        "Not enough reviewed assessment data",
+    };
+  }
+
+  /* =======================================================
+     1. OVERALL COMPETENCY
+     ======================================================= */
+
+  if (
+    competency.competencyScore <
+    COACHING_THRESHOLDS.criticalCompetency
+  ) {
+    priorityScore += 5;
+
+    signals.push({
+      label: "Low competency",
+
+      detail: `Current competency is ${competency.competencyScore}%, below the ${COACHING_THRESHOLDS.criticalCompetency}% critical coaching threshold.`,
+
+      severity: "high",
+    });
+  } else if (
+    competency.competencyScore <
+    COACHING_THRESHOLDS.competencyThreshold
+  ) {
+    priorityScore += 3;
+
+    signals.push({
+      label: "Developing competency",
+
+      detail: `Current competency is ${competency.competencyScore}%, below the ${COACHING_THRESHOLDS.competencyThreshold}% competency target.`,
+
+      severity: "medium",
+    });
+  } else {
+    signals.push({
+      label: "Competency target met",
+
+      detail: `Current competency is ${competency.competencyScore}%.`,
+
+      severity: "positive",
+    });
+  }
+
+  /* =======================================================
+     2. PERSISTENT KNOWLEDGE GAPS
+     ======================================================= */
+
+  const persistentGapCount =
+    competency.persistentGaps.length;
+
+  if (
+    persistentGapCount >=
+    COACHING_THRESHOLDS.highPersistentGaps
+  ) {
+    priorityScore += 5;
+
+    signals.push({
+      label: "Multiple persistent gaps",
+
+      detail: `${persistentGapCount} questions have been missed below competency threshold repeatedly.`,
+
+      severity: "high",
+    });
+  } else if (
+    persistentGapCount >=
+    COACHING_THRESHOLDS.mediumPersistentGaps
+  ) {
+    priorityScore += 2;
+
+    signals.push({
+      label: "Persistent knowledge gap",
+
+      detail: `${persistentGapCount} repeated knowledge ${
+        persistentGapCount === 1 ? "gap has" : "gaps have"
+      } been detected.`,
+
+      severity: "medium",
+    });
+  }
+
+  /* =======================================================
+     3. WEAKEST MODULE
+     ======================================================= */
+
+  const weakestModule =
+    competency.weakestModule;
+
+  if (
+    weakestModule &&
+    weakestModule.score <
+      COACHING_THRESHOLDS.criticalModuleScore
+  ) {
+    priorityScore += 4;
+
+    signals.push({
+      label: `Critical weakness: ${weakestModule.module}`,
+
+      detail: `${weakestModule.module} competency is only ${weakestModule.score}%.`,
+
+      severity: "high",
+    });
+  } else if (
+    weakestModule &&
+    weakestModule.score <
+      COACHING_THRESHOLDS.weakModuleScore
+  ) {
+    priorityScore += 2;
+
+    signals.push({
+      label: `Weak module: ${weakestModule.module}`,
+
+      detail: `${weakestModule.module} competency is ${weakestModule.score}%.`,
+
+      severity: "medium",
+    });
+  }
+
+  /* =======================================================
+     4. LEARNING TREND
+     ======================================================= */
+
+  if (
+    competency.learningTrend ===
+    "declining"
+  ) {
+    if (
+      competency.learningVelocity !== null &&
+      competency.learningVelocity <=
+        COACHING_THRESHOLDS.significantDecline
+    ) {
+      priorityScore += 4;
+
+      signals.push({
+        label: "Significant decline",
+
+        detail: `Reviewed performance has declined by ${Math.abs(
+          competency.learningVelocity
+        )} percentage points from the first reviewed attempt.`,
+
+        severity: "high",
+      });
+    } else {
+      priorityScore += 2;
+
+      signals.push({
+        label: "Declining performance",
+
+        detail: `Reviewed performance has declined by ${Math.abs(
+          competency.learningVelocity ?? 0
+        )} percentage points.`,
+
+        severity: "medium",
+      });
+    }
+  } else if (
+    competency.learningTrend ===
+    "improving"
+  ) {
+    signals.push({
+      label: "Improving",
+
+      detail: `Reviewed performance has improved by ${
+        competency.learningVelocity ?? 0
+      } percentage points.`,
+
+      severity: "positive",
+    });
+  }
+
+  /* =======================================================
+     5. REPEATED ATTEMPTS
+
+     Supporting signal only.
+
+     We deliberately do NOT make repeated attempts sufficient
+     by themselves to create High coaching priority because
+     Until Perfect exams naturally generate retries.
+     ======================================================= */
+
+  if (
+    competency.totalAttempts >=
+      COACHING_THRESHOLDS.repeatedAttemptThreshold &&
+    competency.competencyScore <
+      COACHING_THRESHOLDS.competencyThreshold
+  ) {
+    priorityScore += 1;
+
+    signals.push({
+      label: "Repeated attempts",
+
+      detail: `${competency.totalAttempts} attempts have been recorded while current competency remains below target.`,
+
+      severity: "medium",
+    });
+  }
+
+  /* =======================================================
+     FINAL PRIORITY
+
+     High:
+     Strong evidence that intervention is required.
+
+     Medium:
+     Coaching opportunity / developing weakness.
+
+     Healthy:
+     No material coaching warning currently detected.
+     ======================================================= */
+
+  let priority: CoachingPriority;
+
+  if (priorityScore >= 7) {
+    priority = "high";
+  } else if (priorityScore >= 2) {
+    priority = "medium";
+  } else {
+    priority = "healthy";
+  }
+
+  /*
+   * Find the strongest reason to display in compact UI.
+   */
+
+  const highSignal =
+    signals.find(
+      (signal) =>
+        signal.severity === "high"
+    );
+
+  const mediumSignal =
+    signals.find(
+      (signal) =>
+        signal.severity === "medium"
+    );
+
+  const positiveSignal =
+    signals.find(
+      (signal) =>
+        signal.severity === "positive"
+    );
+
+  const primaryReason =
+    highSignal?.label ??
+    mediumSignal?.label ??
+    positiveSignal?.label ??
+    "No significant coaching risks detected";
+
+  return {
+    agentId: competency.agentId,
+
+    agent: competency.agent,
+
+    priority,
+
+    priorityScore,
+
+    competencyScore:
+      competency.competencyScore,
+
+    weakestModule,
+
+    persistentGapCount,
+
+    learningTrend:
+      competency.learningTrend,
+
+    learningVelocity:
+      competency.learningVelocity,
+
+    reviewedAttempts:
+      competency.reviewedAttempts,
+
+    totalAttempts:
+      competency.totalAttempts,
+
+    signals,
+
+    primaryReason,
+  };
+}
+
+/* =========================================================
+   CALCULATE COACHING PRIORITY FOR ALL AGENTS
+   ========================================================= */
+
+export function calculateAllCoachingAssessments(
+  competencies: AgentCompetency[]
+): AgentCoachingAssessment[] {
+  const priorityOrder: Record<
+    CoachingPriority,
+    number
+  > = {
+    high: 0,
+    medium: 1,
+    healthy: 2,
+    insufficient_data: 3,
+  };
+
+  return competencies
+    .map(calculateCoachingAssessment)
+    .sort((a, b) => {
+      /*
+       * Priority group first.
+       */
+      const priorityDifference =
+        priorityOrder[a.priority] -
+        priorityOrder[b.priority];
+
+      if (priorityDifference !== 0) {
+        return priorityDifference;
+      }
+
+      /*
+       * Within the same group, show the strongest
+       * coaching signals first.
+       */
+      if (
+        b.priorityScore !==
+        a.priorityScore
+      ) {
+        return (
+          b.priorityScore -
+          a.priorityScore
+        );
+      }
+
+      /*
+       * Lower competency comes first when urgency ties.
+       */
+      const scoreA =
+        a.competencyScore ?? 101;
+
+      const scoreB =
+        b.competencyScore ?? 101;
+
+      return scoreA - scoreB;
+    });
+}

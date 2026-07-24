@@ -22,7 +22,10 @@ import { fetchAllUsers } from "@/lib/users";
 
 import {
   calculateAllAgentCompetencies,
+  calculateAllCoachingAssessments,
   type AgentCompetency,
+  type AgentCoachingAssessment,
+  type CoachingPriority,
   type LearningTrend,
 } from "@/lib/competency";
 
@@ -88,6 +91,27 @@ export function AnalyticsDashboard() {
       }),
     [attempts, questions, users]
   );
+  const coachingAssessments = useMemo(
+  () => calculateAllCoachingAssessments(competencies),
+  [competencies]
+);
+
+const coachingCounts = useMemo(
+  () => ({
+    high: coachingAssessments.filter(
+      (item) => item.priority === "high"
+    ).length,
+
+    medium: coachingAssessments.filter(
+      (item) => item.priority === "medium"
+    ).length,
+
+    healthy: coachingAssessments.filter(
+      (item) => item.priority === "healthy"
+    ).length,
+  }),
+  [coachingAssessments]
+);
 
   const questionMap = useMemo(
     () =>
@@ -550,6 +574,76 @@ export function AnalyticsDashboard() {
             </div>
           )}
         </section>
+        {/* COACHING PRIORITY */}
+
+<section className="card overflow-hidden">
+  <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 dark:border-slate-700">
+    <div>
+      <div className="flex items-center gap-2">
+        <Target className="h-4 w-4 text-slate-500" />
+
+        <h2 className="font-semibold">
+          Coaching Priority
+        </h2>
+
+        <MetricInfo
+          title="Coaching Priority"
+          description="Agents are prioritized using current competency, persistent knowledge gaps, weak modules, learning trend and repeated attempts. Repeated attempts alone do not create a high priority."
+        />
+      </div>
+
+      <p className="mt-1 text-sm text-slate-500">
+        Agents who may require QA coaching or knowledge
+        reinforcement.
+      </p>
+    </div>
+
+    <div className="flex flex-wrap gap-2">
+      <PriorityCount
+        label="High"
+        count={coachingCounts.high}
+        priority="high"
+      />
+
+      <PriorityCount
+        label="Medium"
+        count={coachingCounts.medium}
+        priority="medium"
+      />
+
+      <PriorityCount
+        label="Healthy"
+        count={coachingCounts.healthy}
+        priority="healthy"
+      />
+    </div>
+  </div>
+
+  {coachingAssessments.length === 0 ? (
+    <div className="p-5">
+      <EmptyState
+        title="No coaching data yet"
+        subtitle="Coaching priority appears after reviewed assessments are available."
+      />
+    </div>
+  ) : (
+    <div className="divide-y divide-slate-100 dark:divide-slate-800">
+      {coachingAssessments.map((assessment) => (
+        <CoachingRow
+          key={assessment.agentId}
+          assessment={assessment}
+          competency={competencies.find(
+            (item) =>
+              item.agentId === assessment.agentId
+          )}
+          onOpenAgent={(competency) =>
+            setSelectedAgent(competency)
+          }
+        />
+      ))}
+    </div>
+  )}
+</section>
 
         {/* MODULE PERFORMANCE */}
 
@@ -1240,6 +1334,242 @@ function AttemptProgression({
     </div>
   );
 }
+/* =========================================================
+   COACHING COMPONENTS
+   ========================================================= */
+
+function CoachingRow({
+  assessment,
+  competency,
+  onOpenAgent,
+}: {
+  assessment: AgentCoachingAssessment;
+  competency?: AgentCompetency;
+  onOpenAgent: (competency: AgentCompetency) => void;
+}) {
+  const canOpen = Boolean(competency);
+
+  return (
+    <button
+      type="button"
+      disabled={!canOpen}
+      onClick={() => {
+        if (competency) {
+          onOpenAgent(competency);
+        }
+      }}
+      className="grid w-full grid-cols-1 gap-4 px-5 py-4 text-left transition hover:bg-slate-50 disabled:cursor-default disabled:hover:bg-transparent dark:hover:bg-slate-800/40 sm:grid-cols-[180px_110px_1fr_150px_30px] sm:items-center"
+    >
+      {/* AGENT */}
+
+      <div className="min-w-0">
+        <p className="truncate font-medium text-slate-900 dark:text-white">
+          {assessment.agent?.name ??
+            assessment.agentId.slice(0, 10)}
+        </p>
+
+        {assessment.agent?.email && (
+          <p className="mt-0.5 truncate text-xs text-slate-400">
+            {assessment.agent.email}
+          </p>
+        )}
+      </div>
+
+      {/* PRIORITY */}
+
+      <div>
+        <PriorityBadge priority={assessment.priority} />
+      </div>
+
+      {/* REASON */}
+
+      <div className="min-w-0">
+        <p className="text-sm font-medium">
+          {assessment.primaryReason}
+        </p>
+
+        <p className="mt-1 text-xs text-slate-500">
+          {buildCoachingSummary(assessment)}
+        </p>
+      </div>
+
+      {/* COMPETENCY */}
+
+      <div className="sm:text-right">
+        <p className="text-sm font-semibold">
+          {assessment.competencyScore !== null
+            ? `${assessment.competencyScore}%`
+            : "Not measured"}
+        </p>
+
+        <p className="mt-0.5 text-xs text-slate-400">
+          competency
+        </p>
+      </div>
+
+      {/* OPEN */}
+
+      <div className="hidden justify-end sm:flex">
+        {canOpen && (
+          <ChevronRight className="h-4 w-4 text-slate-400" />
+        )}
+      </div>
+    </button>
+  );
+}
+
+function PriorityBadge({
+  priority,
+}: {
+  priority: CoachingPriority;
+}) {
+  const config: Record<
+    CoachingPriority,
+    {
+      label: string;
+      className: string;
+    }
+  > = {
+    high: {
+      label: "High",
+      className:
+        "bg-red-50 text-red-700 ring-red-200 dark:bg-red-950/40 dark:text-red-300 dark:ring-red-900",
+    },
+
+    medium: {
+      label: "Medium",
+      className:
+        "bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-900",
+    },
+
+    healthy: {
+      label: "Healthy",
+      className:
+        "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-900",
+    },
+
+    insufficient_data: {
+      label: "Insufficient",
+      className:
+        "bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700",
+    },
+  };
+
+  const current = config[priority];
+
+  return (
+    <span
+      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${current.className}`}
+    >
+      {current.label}
+    </span>
+  );
+}
+
+function PriorityCount({
+  label,
+  count,
+  priority,
+}: {
+  label: string;
+  count: number;
+  priority: CoachingPriority;
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-slate-200 px-2.5 py-1.5 dark:border-slate-700">
+      <PriorityDot priority={priority} />
+
+      <span className="text-xs text-slate-500">
+        {label}
+      </span>
+
+      <span className="text-xs font-semibold">
+        {count}
+      </span>
+    </div>
+  );
+}
+
+function PriorityDot({
+  priority,
+}: {
+  priority: CoachingPriority;
+}) {
+  let className = "bg-slate-400";
+
+  if (priority === "high") {
+    className = "bg-red-500";
+  }
+
+  if (priority === "medium") {
+    className = "bg-amber-500";
+  }
+
+  if (priority === "healthy") {
+    className = "bg-emerald-500";
+  }
+
+  return (
+    <span
+      className={`h-2 w-2 rounded-full ${className}`}
+    />
+  );
+}
+
+function buildCoachingSummary(
+  assessment: AgentCoachingAssessment
+) {
+  const parts: string[] = [];
+
+  if (assessment.persistentGapCount > 0) {
+    parts.push(
+      `${assessment.persistentGapCount} persistent ${
+        assessment.persistentGapCount === 1
+          ? "gap"
+          : "gaps"
+      }`
+    );
+  }
+
+  if (assessment.weakestModule) {
+    parts.push(
+      `${assessment.weakestModule.module} ${assessment.weakestModule.score}%`
+    );
+  }
+
+  if (
+    assessment.learningTrend === "improving" &&
+    assessment.learningVelocity !== null
+  ) {
+    parts.push(
+      `improving +${assessment.learningVelocity}%`
+    );
+  }
+
+  if (
+    assessment.learningTrend === "declining" &&
+    assessment.learningVelocity !== null
+  ) {
+    parts.push(
+      `declining ${Math.abs(
+        assessment.learningVelocity
+      )}%`
+    );
+  }
+
+  if (parts.length === 0) {
+    if (
+      assessment.priority === "insufficient_data"
+    ) {
+      return "More reviewed assessment data required.";
+    }
+
+    return "No significant coaching risks detected.";
+  }
+
+  return parts.join(" · ");
+}
+
 
 /* =========================================================
    HELPERS
