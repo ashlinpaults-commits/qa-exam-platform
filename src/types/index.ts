@@ -29,22 +29,24 @@ export interface Question {
   questionText: string;
   expectedAnswer: string;
   notes?: string;
+
   // "<module>::<Question No.>" from the source spreadsheet, when available.
-  // Used to detect duplicates across separate import runs (e.g. retrying a
-  // partially-failed import shouldn't create a second copy of every row that
-  // already succeeded).
+  // Used to detect duplicates across separate import runs.
   sourceId?: string;
-  // type-specific payloads
-  options?: string[]; // mcq
-  correctOptionIndex?: number; // mcq
-  imageUrl?: string; // image_based
-  caseStudyContext?: string; // case_study (ticket transcript etc.)
-  orderItems?: string[]; // drag_drop_order (correct order)
+
+  // Type-specific payloads
+  options?: string[];
+  correctOptionIndex?: number;
+  imageUrl?: string;
+  caseStudyContext?: string;
+  orderItems?: string[];
+
   version: number;
   createdBy: string;
   createdAt: number;
   updatedAt: number;
-  // rolling analytics, denormalized for fast reads
+
+  // Rolling analytics, denormalized for fast reads
   stats: {
     timesAsked: number;
     avgMarks: number;
@@ -53,8 +55,18 @@ export interface Question {
   };
 }
 
+/* =========================================================
+   EXAMS
+   ========================================================= */
+
 export type ExamMode = "normal" | "until_perfect";
-export type ExamStatus = "draft" | "published" | "active" | "completed" | "archived";
+
+export type ExamStatus =
+  | "draft"
+  | "published"
+  | "active"
+  | "completed"
+  | "archived";
 
 export interface ExamQuestionRef {
   questionId: string;
@@ -74,32 +86,108 @@ export interface Exam {
   updatedAt: number;
 }
 
+/* =========================================================
+   PHASE 1 - KNOWLEDGE GAP TRACKING
+   ========================================================= */
+
+export type KnowledgeGapCategory =
+  | "Product Knowledge"
+  | "Workflow"
+  | "Navigation"
+  | "Troubleshooting"
+  | "Insurance"
+  | "Reporting"
+  | "Clinical"
+  | "Scheduler"
+  | "Communication"
+  | "Compliance"
+  | "Other";
+
+/* =========================================================
+   ATTEMPT ANSWERS
+   ========================================================= */
+
+export interface ScoreHistoryEntry {
+  marks: number;
+  changedBy: string;
+  reason: string;
+  timestamp: number;
+}
+
 export interface AttemptAnswer {
   questionId: string;
   agentAnswer: string;
-  marks?: number; // filled by auditor
+
+  // Filled by auditor
+  marks?: number;
+
   maxMarks: number;
   comments?: string;
-  scoreHistory?: {
-    marks: number;
-    changedBy: string;
-    reason: string;
-    timestamp: number;
-  }[];
+
+  // Phase 1 competency tracking
+  knowledgeGapCategory?: KnowledgeGapCategory;
+
+  // Audit trail for score changes
+  scoreHistory?: ScoreHistoryEntry[];
 }
+
+/* =========================================================
+   EXAM ATTEMPTS
+   ========================================================= */
+
+export type AttemptStatus =
+  | "in_progress"
+  | "submitted"
+  | "review_in_progress"
+  | "reviewed";
 
 export interface ExamAttempt {
   id: string;
   examId: string;
   agentId: string;
   attemptNumber: number;
+
   answers: AttemptAnswer[];
+
+  /* -------------------------
+     Agent attempt lifecycle
+     ------------------------- */
+
   startedAt: number;
   submittedAt?: number;
   timeTakenSeconds?: number;
+
+  /* -------------------------
+     Scoring
+     ------------------------- */
+
   totalMarks?: number;
   maxTotalMarks?: number;
-  status: "in_progress" | "submitted" | "reviewed";
+
+  /* -------------------------
+     Attempt state
+     ------------------------- */
+
+  status: AttemptStatus;
+
+  /* -------------------------
+     Auditor review lifecycle
+     ------------------------- */
+
+  // Set when auditor first saves/starts the review
+  reviewStartedAt?: number;
+
+  // Auditor who reviewed/scored the attempt
   reviewedBy?: string;
+
+  // Set when the final review is submitted
   reviewedAt?: number;
+
+  /* -------------------------
+     Analytics protection
+     ------------------------- */
+
+  // Prevents finalized analytics from being counted
+  // more than once for the same attempt.
+  analyticsFinalized?: boolean;
 }
