@@ -408,7 +408,10 @@ export async function submitAttempt(
 /**
  * Save auditor scoring WITHOUT finalizing the review.
  *
- * This is the Save Draft operation.
+ * This is the Save Draft operation for an active review.
+ * If the attempt is already reviewed, the same operation performs
+ * a controlled post-publication amendment and refreshes affected
+ * question analytics.
  */
 export async function saveReviewDraft(
   attempt: ExamAttempt,
@@ -420,115 +423,201 @@ export async function saveReviewDraft(
   changeReason?: string
 ) {
   if (marks < 0) {
-    throw new Error(
-      "Marks cannot be below zero."
-    );
+    throw new Error("Marks cannot be below zero.");
   }
 
-  const target =
-    attempt.answers.find(
-      (answer) =>
-        answer.questionId ===
-        questionId
-    );
-
-  if (!target) {
-    throw new Error(
-      "Question answer not found."
-    );
-  }
-
-  if (
-    marks >
-    target.maxMarks
-  ) {
-    throw new Error(
-      `Marks cannot exceed ${target.maxMarks}.`
-    );
-  }
-
-  const answers =
-    attempt.answers.map(
-      (answer) => {
-        if (
-          answer.questionId !==
-          questionId
-        ) {
-          return answer;
-        }
-
-        const isChange =
-          answer.marks !==
-            undefined &&
-          answer.marks !== marks;
-
-        const history =
-          answer.scoreHistory ?? [];
-
-        const updatedAnswer:
-          AttemptAnswer = {
-          ...answer,
-
-          marks,
-
-          comments:
-            comments ?? "",
-
-          scoreHistory:
-            isChange
-              ? [
-                  ...history,
-                  {
-                    marks,
-                    changedBy:
-                      scoredBy,
-                    reason:
-                      changeReason?.trim() ||
-                      "Score updated during review",
-                    timestamp:
-                      Date.now(),
-                  },
-                ]
-              : history,
-        };
-
-        /*
-         * Firestore cannot store undefined.
-         *
-         * Only store a knowledge gap when
-         * the answer actually lost marks.
-         */
-        if (
-          marks <
-            answer.maxMarks &&
-          knowledgeGapCategory
-        ) {
-          updatedAnswer.knowledgeGapCategory =
-            knowledgeGapCategory;
-        } else {
-          delete updatedAnswer.knowledgeGapCategory;
-        }
-
-        return updatedAnswer;
-      }
-    );
-
-  const updateData = {
-    answers,
-    status:
-      "review_in_progress" as const,
-    reviewedBy: scoredBy,
-    reviewStartedAt:
-      attempt.reviewStartedAt ??
-      Date.now(),
-  };
-
-  await updateDoc(
-    doc(db, COL, attempt.id),
-    updateData
+  const target = attempt.answers.find(
+    (answer) => answer.questionId === questionId
   );
 
+  if (!target) {
+    throw new Error("Question answer not found.");
+  }
+
+  if (marks > target.maxMarks) {
+    throw new Error(`Marks cannot exceed ${target.maxMarks}.`);
+  }
+
+  const isPublishedAttempt = attempt.status === "reviewed";
+  const isScoreChange =
+    target.marks !== undefined && target.marks !== marks;
+
+  /*
+   * Once a scorecard has been published, a score amendment must
+   * include a reason. This keeps the published result editable
+   * without making changes invisible to QA leadership.
+   */
+  if (isPublishedAttempt && isScoreChange && !changeReason?.trim()) {
+    throw new Error(
+      "A reason is required when changing a score on a published scorecard."
+    );
+  }
+
+  const answers = attempt.answers.map((answer) => {
+    if (answer.questionId !== questionId) {
+      return answer;
+    }
+
+    const history = answer.scoreHistory ?? [];
+
+    const updatedAnswer: AttemptAnswer = {
+      ...answer,
+      marks,
+      comments: comments ?? "",
+      scoreHistory: isScoreChange
+        ? [
+            ...history,
+            {
+              previousMarks: answer.marks,
+              marks,
+              changedBy: scoredBy,
+              reason:
+                changeReason?.trim() ||
+                "Score updated during review",
+              timestamp: Date.now(),
+            },
+          ]
+        : history,
+    };
+
+    /* Firestore cannot store undefined. */
+    if (marks < answer.maxMarks && knowledgeGapCategory) {
+      updatedAnswer.knowledgeGapCategory = knowledgeGapCategory;
+    } else if (marks === answer.maxMarks) {
+      delete updatedAnswer.knowledgeGapCategory;
+    } else if (knowledgeGapCategory) {
+      updatedAnswer.knowledgeGapCategory = knowledgeGapCategory;
+    }
+
+    return updatedAnswer;
+  });
+
+  const totalMarks = answers.reduce(
+    (sum, answer) => sum + (answer.marks ?? 0),
+    0
+  );
+
+  const maxTotalMarks = answers.reduce(
+    (sum, answer) => sum + answer.maxMarks,
+    0
+  );
+
+  const now = Date.now();
+
+  const updateData = isPublishedAttempt
+    ? {
+        answers,
+        totalMarks,
+        maxTotalMarks,
+        // Keep the original published/reviewed timestamp intact.
+        status: "reviewed" as const,
+        lastAmendedBy: scoredBy,
+        lastAmendedAt: now,
+      }
+    : {
+        answers,
+        totalMarks,
+        maxTotalMarks,
+        status: "review_in_progress" as const,
+        reviewedBy: scoredBy,
+        reviewStartedAt: attempt.reviewStartedAt ?? now,
+      };
+
+  await updateDoc(doc(db, COL, attempt.id), updateData);
+
+  /*
+   * A post-publication score change changes the source data for
+   * question-level analytics. Rebuild the affected question stats
+   * from reviewed attempts so old aggregate values cannot become stale.
+   * This path is intentionally correctness-first because amendments
+   * are rare compared with normal dashboard reads.
+   */
+  if (isPublishedAttempt && isScoreChange) {
+    await recalculateQuestionStats([questionId]);
+  }
+
   return answers;
+}
+
+/* =========================================================
+   REBUILD QUESTION ANALYTICS AFTER AN AMENDMENT
+   ========================================================= */
+
+async function recalculateQuestionStats(questionIds: string[]) {
+  const wanted = new Set(questionIds);
+  const snap = await getDocs(collection(db, COL));
+
+  const aggregates = new Map<
+    string,
+    { timesAsked: number; totalMarks: number; correctCount: number }
+  >();
+
+  snap.docs.forEach((attemptDoc) => {
+    const attempt = {
+      id: attemptDoc.id,
+      ...attemptDoc.data(),
+    } as ExamAttempt;
+
+    if (attempt.status !== "reviewed") return;
+
+    attempt.answers.forEach((answer) => {
+      if (!wanted.has(answer.questionId) || answer.marks === undefined) {
+        return;
+      }
+
+      const current = aggregates.get(answer.questionId) ?? {
+        timesAsked: 0,
+        totalMarks: 0,
+        correctCount: 0,
+      };
+
+      current.timesAsked += 1;
+      current.totalMarks += answer.marks;
+
+      if (
+        answer.maxMarks > 0 &&
+        answer.marks / answer.maxMarks >= 0.7
+      ) {
+        current.correctCount += 1;
+      }
+
+      aggregates.set(answer.questionId, current);
+    });
+  });
+
+  const batch = writeBatch(db);
+
+  for (const questionId of wanted) {
+    const aggregate = aggregates.get(questionId);
+
+    if (!aggregate || aggregate.timesAsked === 0) {
+      batch.update(doc(db, "questions", questionId), {
+        stats: {
+          timesAsked: 0,
+          avgMarks: 0,
+          correctPct: 0,
+          incorrectPct: 0,
+        },
+        updatedAt: Date.now(),
+      });
+      continue;
+    }
+
+    const correctPct =
+      (aggregate.correctCount / aggregate.timesAsked) * 100;
+
+    batch.update(doc(db, "questions", questionId), {
+      stats: {
+        timesAsked: aggregate.timesAsked,
+        avgMarks: aggregate.totalMarks / aggregate.timesAsked,
+        correctPct,
+        incorrectPct: 100 - correctPct,
+      },
+      updatedAt: Date.now(),
+    });
+  }
+
+  await batch.commit();
 }
 
 /* =========================================================
@@ -538,8 +627,9 @@ export async function saveReviewDraft(
 /**
  * Finalize the ENTIRE review.
  *
- * This is the ONLY operation that changes an attempt
- * to "reviewed".
+ * This is the operation that publishes an active review as
+ * an official "reviewed" attempt. Published attempts are later
+ * amendable through saveReviewDraft without reopening the review. 
  */
 export async function finalizeReview(
   attemptId: string,
