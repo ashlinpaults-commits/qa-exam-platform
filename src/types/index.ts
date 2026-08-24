@@ -197,6 +197,7 @@ export type AuditAction =
   | "attempt_submitted"
   | "review_saved"
   | "review_finalized"
+  | "scorecard_amended"
   | "report_viewed"
   | "report_queued"
   | "user_role_changed";
@@ -205,7 +206,13 @@ export interface AuditLogEntry {
   id: string;
   action: AuditAction;
   actorId: string;
-  entityType: "stream" | "batch" | "exam" | "attempt" | "report" | "user";
+  entityType:
+    | "stream"
+    | "batch"
+    | "exam"
+    | "attempt"
+    | "report"
+    | "user";
   entityId: string;
   summary: string;
   metadata?: Record<string, string | number | boolean | null>;
@@ -213,7 +220,7 @@ export interface AuditLogEntry {
 }
 
 /* =========================================================
-   PHASE 1 - KNOWLEDGE GAP TRACKING
+   KNOWLEDGE GAP TRACKING
    ========================================================= */
 
 export type KnowledgeGapCategory =
@@ -234,9 +241,22 @@ export type KnowledgeGapCategory =
    ========================================================= */
 
 export interface ScoreHistoryEntry {
+  /**
+   * The score before this amendment.
+   * Optional so existing/legacy score-history entries remain valid.
+   */
+  previousMarks?: number;
+
+  /** The new score after the amendment. */
   marks: number;
+
+  /** Auditor/user who made the change. */
   changedBy: string;
+
+  /** Mandatory reason for a post-review score amendment. */
   reason: string;
+
+  /** Unix timestamp in milliseconds. */
   timestamp: number;
 }
 
@@ -308,6 +328,22 @@ export interface ExamAttempt {
 
   // Set when the final review is submitted
   reviewedAt?: number;
+
+  /* -------------------------
+     Post-publication amendment
+     ------------------------- */
+
+  /**
+   * Last time a published/reviewed scorecard was amended.
+   * Uses the same Unix-millisecond timestamp convention as the
+   * rest of the attempt model.
+   */
+  lastAmendedAt?: number;
+
+  /**
+   * User ID of the auditor who made the latest amendment.
+   */
+  lastAmendedBy?: string;
 
   /* -------------------------
      Analytics protection
