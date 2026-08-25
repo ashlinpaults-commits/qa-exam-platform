@@ -91,6 +91,9 @@ export interface Exam {
   assessmentMode?: AssessmentMode;
   status: ExamStatus;
   questions: ExamQuestionRef[];
+  // Safe projection used by agents. Never put expectedAnswer or grading keys
+  // in this field; agents must not read the question bank directly.
+  questionSnapshots?: Record<string, Question>;
   assignedAgentIds: string[];
   batchId?: string;
   moduleScope?: string[];
@@ -197,7 +200,6 @@ export type AuditAction =
   | "attempt_submitted"
   | "review_saved"
   | "review_finalized"
-  | "scorecard_amended"
   | "report_viewed"
   | "report_queued"
   | "user_role_changed";
@@ -206,13 +208,7 @@ export interface AuditLogEntry {
   id: string;
   action: AuditAction;
   actorId: string;
-  entityType:
-    | "stream"
-    | "batch"
-    | "exam"
-    | "attempt"
-    | "report"
-    | "user";
+  entityType: "stream" | "batch" | "exam" | "attempt" | "report" | "user";
   entityId: string;
   summary: string;
   metadata?: Record<string, string | number | boolean | null>;
@@ -220,7 +216,7 @@ export interface AuditLogEntry {
 }
 
 /* =========================================================
-   KNOWLEDGE GAP TRACKING
+   PHASE 1 - KNOWLEDGE GAP TRACKING
    ========================================================= */
 
 export type KnowledgeGapCategory =
@@ -241,22 +237,9 @@ export type KnowledgeGapCategory =
    ========================================================= */
 
 export interface ScoreHistoryEntry {
-  /**
-   * The score before this amendment.
-   * Optional so existing/legacy score-history entries remain valid.
-   */
-  previousMarks?: number;
-
-  /** The new score after the amendment. */
   marks: number;
-
-  /** Auditor/user who made the change. */
   changedBy: string;
-
-  /** Mandatory reason for a post-review score amendment. */
   reason: string;
-
-  /** Unix timestamp in milliseconds. */
   timestamp: number;
 }
 
@@ -275,6 +258,14 @@ export interface AttemptAnswer {
 
   // Audit trail for score changes
   scoreHistory?: ScoreHistoryEntry[];
+
+  // Full copy of the Question Bank question as it existed when this
+  // attempt was created. Historical attempts must always show what the
+  // agent actually saw/answered, even if the Question Bank entry is later
+  // edited or deleted. Optional so attempts created before this field
+  // existed remain representable; new attempts use the safe snapshot
+  // published on the exam.
+  questionSnapshot?: Question;
 }
 
 /* =========================================================
@@ -294,6 +285,11 @@ export interface ExamAttempt {
   attemptNumber: number;
 
   answers: AttemptAnswer[];
+
+  // Agent-owned draft answers. Kept separate from the auditor-owned `answers`
+  // array so Firestore rules can permit autosave without permitting score
+  // mutations inside a client-supplied array.
+  agentAnswers?: Record<string, string>;
 
   /* -------------------------
      Agent attempt lifecycle
@@ -328,22 +324,6 @@ export interface ExamAttempt {
 
   // Set when the final review is submitted
   reviewedAt?: number;
-
-  /* -------------------------
-     Post-publication amendment
-     ------------------------- */
-
-  /**
-   * Last time a published/reviewed scorecard was amended.
-   * Uses the same Unix-millisecond timestamp convention as the
-   * rest of the attempt model.
-   */
-  lastAmendedAt?: number;
-
-  /**
-   * User ID of the auditor who made the latest amendment.
-   */
-  lastAmendedBy?: string;
 
   /* -------------------------
      Analytics protection

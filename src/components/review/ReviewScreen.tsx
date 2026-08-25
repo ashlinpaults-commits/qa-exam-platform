@@ -7,7 +7,7 @@ import {
   saveReviewDraft,
   finalizeReview,
 } from "@/lib/attempts";
-import { getQuestion } from "@/lib/questions";
+import { getQuestionsByIds } from "@/lib/questions";
 import { fetchAllUsers } from "@/lib/users";
 import { useAuth } from "@/context/AuthContext";
 import type {
@@ -26,8 +26,6 @@ import {
   Save,
   CheckCircle2,
   AlertTriangle,
-  Pencil,
-  X,
 } from "lucide-react";
 
 const KNOWLEDGE_GAPS: KnowledgeGapCategory[] = [
@@ -59,17 +57,24 @@ export function ReviewScreen() {
   const [finalizingId, setFinalizingId] = useState<string | null>(
     null
   );
-  const [editingPublishedId, setEditingPublishedId] = useState<string | null>(
-    null
-  );
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
   } | null>(null);
 
   useEffect(() => {
-    fetchExams().then(setExams);
-    fetchAllUsers().then(setUsers);
+    Promise.all([fetchExams(), fetchAllUsers()])
+      .then(([loadedExams, loadedUsers]) => {
+        setExams(loadedExams);
+        setUsers(loadedUsers);
+      })
+      .catch((err) => {
+        console.error("Failed to load review data", err);
+        setMessage({
+          type: "error",
+          text: err instanceof Error ? err.message : "Unable to load review data.",
+        });
+      });
   }, []);
 
   useEffect(() => {
@@ -97,9 +102,7 @@ export function ReviewScreen() {
     );
 
     if (missing.length) {
-      const fetched = await Promise.all(
-        missing.map((id) => getQuestion(id))
-      );
+      const fetched = await getQuestionsByIds(missing);
 
       setQuestionCache((prev) => {
         const next = { ...prev };
@@ -113,9 +116,12 @@ export function ReviewScreen() {
     }
   }
 
-  async function refreshAttempts() {
-    if (!selectedExam) return;
-    await loadAttempts(selectedExam);
+  // Patches one attempt in local state instead of re-querying every attempt
+  // for the exam. Both saveReviewDraft and finalizeReview already return the
+  // full updated attempt, so there's no need to hit Firestore again just to
+  // reflect a single-document change we already have in hand.
+  function patchAttempt(updated: ExamAttempt) {
+    setAttempts((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
   }
 
   function userName(uid: string) {
@@ -164,7 +170,7 @@ export function ReviewScreen() {
         }/${finalized.maxTotalMarks ?? 0}.`,
       });
 
-      await refreshAttempts();
+      patchAttempt(finalized);
     } catch (error) {
       console.error(error);
 
@@ -203,7 +209,6 @@ export function ReviewScreen() {
           onChange={(e) => {
             setSelectedExam(e.target.value);
             setExpanded(null);
-            setEditingPublishedId(null);
             setMessage(null);
           }}
         >
@@ -408,53 +413,30 @@ export function ReviewScreen() {
                       </div>
                     )}
 
-                    {attempt.status === "reviewed" && (
-                      <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20">
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                          <div>
-                            <p className="font-semibold text-amber-900 dark:text-amber-200">
-                              Published Scorecard
-                            </p>
-                            <p className="mt-1 text-sm text-amber-800 dark:text-amber-300">
-                              This scorecard is official but can be amended. Score changes require a reason and are recorded in the score history.
-                            </p>
-                            {attempt.lastAmendedAt && (
-                              <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
-                                Last amended: {new Date(attempt.lastAmendedAt).toLocaleString()}
-                              </p>
-                            )}
-                          </div>
-
-                          {editingPublishedId === attempt.id ? (
-                            <button
-                              type="button"
-                              className="btn-secondary flex items-center gap-2"
-                              onClick={() => setEditingPublishedId(null)}
-                            >
-                              <X className="h-4 w-4" />
-                              Done Editing
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              className="btn-primary flex items-center gap-2"
-                              onClick={() => {
-                                setEditingPublishedId(attempt.id);
-                                setMessage(null);
-                              }}
-                            >
-                              <Pencil className="h-4 w-4" />
-                              Amend Scorecard
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
                     <div className="space-y-4">
                       {attempt.answers.map((ans, index) => {
-                        const q =
-                          questionCache[ans.questionId];
+                        // The snapshot frozen on this attempt is
+                        // deliberately redacted (no expectedAnswer/
+                        // correctOptionIndex) so agents can't read
+                        // answer keys through their own attempt document.
+                        // Merge the live, auditor-only question cache's
+                        // real answer key back in for the grading
+                        // reference, while keeping the frozen historical
+                        // question text/options/type. Older attempts
+                        // without a snapshot fall back to the live cache
+                        // entirely.
+                        const live = questionCache[ans.questionId];
+                        const q = ans.questionSnapshot
+                          ? {
+                              ...ans.questionSnapshot,
+                              expectedAnswer:
+                                live?.expectedAnswer ??
+                                ans.questionSnapshot.expectedAnswer,
+                              correctOptionIndex:
+                                live?.correctOptionIndex ??
+                                ans.questionSnapshot.correctOptionIndex,
+                            }
+                          : live;
 
                         if (!q) return null;
 
@@ -467,10 +449,9 @@ export function ReviewScreen() {
                             attempt={attempt}
                             reviewerId={profile?.uid ?? ""}
                             disabled={
-                              attempt.status === "reviewed" &&
-                              editingPublishedId !== attempt.id
+                              attempt.status === "reviewed"
                             }
-                            onSaved={refreshAttempts}
+                            onSaved={patchAttempt}
                           />
                         );
                       })}
@@ -515,32 +496,27 @@ export function ReviewScreen() {
                     )}
 
                     {attempt.status === "reviewed" && (
-                      <div className="mt-5 flex flex-wrap items-center justify-between gap-4 rounded-xl border border-green-200 bg-green-50 p-4 dark:border-green-800 dark:bg-green-900/20">
+                      <div className="mt-5 rounded-xl border border-green-200 bg-green-50 p-4 dark:border-green-800 dark:bg-green-900/20">
                         <div className="flex items-center gap-2">
                           <CheckCircle2 className="h-5 w-5 text-green-600" />
 
                           <div>
                             <p className="font-semibold text-green-800 dark:text-green-300">
-                              Review Published
+                              Review Completed
                             </p>
 
                             <p className="text-sm text-green-700 dark:text-green-400">
-                              Current Score: {attempt.totalMarks ?? 0}/
+                              Final Score:{" "}
+                              {attempt.totalMarks ?? 0}/
                               {attempt.maxTotalMarks ?? 0}
                               {attempt.reviewedAt
-                                ? ` · Published ${new Date(
+                                ? ` · ${new Date(
                                     attempt.reviewedAt
                                   ).toLocaleString()}`
                                 : ""}
                             </p>
                           </div>
                         </div>
-
-                        {editingPublishedId === attempt.id && (
-                          <p className="text-xs font-medium text-amber-700 dark:text-amber-300">
-                            Changes save directly to the published scorecard and refresh its analytics.
-                          </p>
-                        )}
                       </div>
                     )}
                   </div>
@@ -569,7 +545,7 @@ function QuestionScoreRow({
   attempt: ExamAttempt;
   reviewerId: string;
   disabled: boolean;
-  onSaved: () => void;
+  onSaved: (updated: ExamAttempt) => void;
 }) {
   const [marks, setMarks] = useState<number | "">(
     answer.marks ?? ""
@@ -649,7 +625,7 @@ function QuestionScoreRow({
     try {
       setSaving(true);
 
-      await saveReviewDraft(
+      const updated = await saveReviewDraft(
         attempt,
         question.id,
         numericMarks,
@@ -662,7 +638,7 @@ function QuestionScoreRow({
       setSaved(true);
       setReason("");
 
-      await onSaved();
+      onSaved(updated);
     } catch (err) {
       console.error(err);
 
@@ -799,18 +775,11 @@ function QuestionScoreRow({
         <div className="mt-3">
           <label className="mb-1 block text-xs font-medium">
             Reason for Score Change
-            {attempt.status === "reviewed" && (
-              <span className="ml-1 text-amber-600">(required)</span>
-            )}
           </label>
 
           <input
             className="input"
-            placeholder={
-              attempt.status === "reviewed"
-                ? "Explain why the published score is being amended..."
-                : "Optional reason for changing the previous score"
-            }
+            placeholder="Optional reason for changing the previous score"
             value={reason}
             onChange={(e) => setReason(e.target.value)}
           />
@@ -867,17 +836,9 @@ function QuestionScoreRow({
         <div className="mt-3 space-y-1 rounded-lg bg-amber-50 p-3 text-xs dark:bg-amber-900/20">
           {answer.scoreHistory.map((h, i) => (
             <p key={i}>
-              {h.previousMarks !== undefined ? (
-                <>
-                  Score changed from <strong>{h.previousMarks}</strong> to{" "}
-                  <strong>{h.marks}</strong>
-                </>
-              ) : (
-                <>
-                  Score changed to <strong>{h.marks}</strong>
-                </>
-              )}{" "}
-              by {h.changedBy} - &quot;{h.reason}&quot; (
+              Score changed to{" "}
+              <strong>{h.marks}</strong> by{" "}
+              {h.changedBy} - &quot;{h.reason}&quot; (
               {new Date(h.timestamp).toLocaleString()})
             </p>
           ))}

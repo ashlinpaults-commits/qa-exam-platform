@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
@@ -14,5 +14,17 @@ const firebaseConfig = {
 
 export const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = getFirestore(app);
+// Use IndexedDB persistence when available.  The guards matter for SSR and
+// browsers where another tab has already claimed the persistence lease.
+export const db = (() => {
+  try {
+    return initializeFirestore(app, {
+      localCache: persistentLocalCache({
+        tabManager: persistentMultipleTabManager(),
+      }),
+    });
+  } catch {
+    return getFirestore(app);
+  }
+})();
 export const storage = getStorage(app);

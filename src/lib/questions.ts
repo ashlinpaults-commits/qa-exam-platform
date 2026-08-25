@@ -1,7 +1,7 @@
 import {
   collection, doc, addDoc, updateDoc, deleteDoc, getDocs, getDoc, query,
   where, orderBy, limit as fbLimit, startAfter, writeBatch, serverTimestamp,
-  increment, QueryDocumentSnapshot, DocumentData,
+  increment, QueryDocumentSnapshot, DocumentData, documentId,
 } from "firebase/firestore";
 import { db } from "./firebase";
 import type { Question, Difficulty, QuestionType } from "@/types";
@@ -85,22 +85,29 @@ export async function getQuestion(id: string): Promise<Question | null> {
 }
 
 export async function getQuestionsByIds(ids: string[]): Promise<Question[]> {
-  // Firestore has no "IN with >30" without chunking; chunk into groups of 30.
+  if (!ids.length) return [];
+  // One `in` query returns up to 30 documents, avoiding N individual RPCs.
   const chunks: string[][] = [];
   for (let i = 0; i < ids.length; i += 30) chunks.push(ids.slice(i, i + 30));
   const results: Question[] = [];
   for (const chunk of chunks) {
-    const snaps = await Promise.all(chunk.map((id) => getDoc(doc(db, COL, id))));
-    snaps.forEach((s) => s.exists() && results.push({ id: s.id, ...s.data() } as Question));
+    const snap = await getDocs(query(collection(db, COL), where(documentId(), "in", chunk)));
+    snap.docs.forEach((s) => results.push({ id: s.id, ...s.data() } as Question));
   }
+  const order = new Map(ids.map((id, index) => [id, index]));
+  results.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   return results;
 }
 
 export async function createQuestion(
   data: Omit<Question, "id" | "createdAt" | "updatedAt" | "version" | "stats">,
   createdBy: string
-) {
-  const ref = await addDoc(collection(db, COL), {
+): Promise<Question> {
+  // Firestore throws (and, since callers rarely catch, silently no-ops in the
+  // UI) on ANY field with value `undefined` — and the question form always
+  // sends the type-specific fields (options, imageUrl, etc.) as `undefined`
+  // for every type that doesn't use them. Strip them before writing.
+  const payload = stripUndefined({
     ...data,
     createdBy,
     version: 1,
@@ -108,22 +115,39 @@ export async function createQuestion(
     updatedAt: Date.now(),
     stats: { timesAsked: 0, avgMarks: 0, correctPct: 0, incorrectPct: 0 },
   });
-  invalidateQuestionBankCache();
-  return ref.id;
+  const ref = await addDoc(collection(db, COL), payload);
+  const created = { id: ref.id, ...payload } as Question;
+  // Patch the cache in place instead of invalidating it — avoids a full
+  // collection re-read (which is what was actually burning through the
+  // Firestore daily read quota on every single save).
+  if (questionBankCache) questionBankCache = [created, ...questionBankCache];
+  return created;
 }
 
-export async function updateQuestion(id: string, data: Partial<Question>) {
-  await updateDoc(doc(db, COL, id), {
+export async function updateQuestion(id: string, data: Partial<Question>): Promise<Question> {
+  const payload = stripUndefined({
     ...data,
     updatedAt: Date.now(),
     version: increment(1),
   });
-  invalidateQuestionBankCache();
+  await updateDoc(doc(db, COL, id), payload);
+  const existing = questionBankCache?.find((q) => q.id === id);
+  const updated = {
+    ...(existing ?? {}),
+    ...data,
+    id,
+    updatedAt: payload.updatedAt as number,
+    version: (existing?.version ?? 0) + 1,
+  } as Question;
+  if (questionBankCache) {
+    questionBankCache = questionBankCache.map((q) => (q.id === id ? updated : q));
+  }
+  return updated;
 }
 
 export async function deleteQuestion(id: string) {
   await deleteDoc(doc(db, COL, id));
-  invalidateQuestionBankCache();
+  if (questionBankCache) questionBankCache = questionBankCache.filter((q) => q.id !== id);
 }
 
 // Bulk insert used by the Excel importer.
@@ -248,10 +272,8 @@ export async function bulkCreateQuestions(
 }
 
 export async function fetchAllModules(): Promise<string[]> {
-  // Denormalized read: pull all questions' module field. Fine at low thousands;
-  // if the bank grows past ~10k, maintain a separate `modules` collection instead.
-  const snap = await getDocs(collection(db, COL));
-  const set = new Set<string>();
-  snap.docs.forEach((d) => set.add((d.data() as Question).module));
-  return Array.from(set).sort();
+  // Reuse the already-loaded bank instead of issuing a second full collection
+  // read when the question browser and a module filter mount together.
+  const questions = await fetchAllQuestions();
+  return Array.from(new Set(questions.map((question) => question.module))).sort();
 }

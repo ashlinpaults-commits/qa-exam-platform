@@ -5,6 +5,13 @@ import type { Question, QuestionType, Difficulty } from "@/types";
 import { createQuestion, updateQuestion } from "@/lib/questions";
 import { useAuth } from "@/context/AuthContext";
 
+function friendlyError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/permission/i.test(msg)) return "You don't have permission to save this question.";
+  if (/undefined/i.test(msg)) return "One of the fields has an invalid empty value. Please check all fields and try again.";
+  return `Couldn't save: ${msg}`;
+}
+
 const TYPES: { value: QuestionType; label: string }[] = [
   { value: "descriptive", label: "Descriptive" },
   { value: "mcq", label: "Multiple Choice" },
@@ -19,7 +26,7 @@ export function QuestionForm({
   onSaved,
 }: {
   existing?: Question | null;
-  onSaved: () => void;
+  onSaved: (saved: Question) => void;
 }) {
   const { profile } = useAuth();
   const [type, setType] = useState<QuestionType>(existing?.type ?? "descriptive");
@@ -36,11 +43,13 @@ export function QuestionForm({
   const [caseStudyContext, setCaseStudyContext] = useState(existing?.caseStudyContext ?? "");
   const [orderItems, setOrderItems] = useState<string[]>(existing?.orderItems ?? ["", ""]);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!profile) return;
     setSaving(true);
+    setError("");
     const base = {
       module: module.trim(),
       feature: feature.trim(),
@@ -57,12 +66,12 @@ export function QuestionForm({
       orderItems: type === "drag_drop_order" ? orderItems.filter(Boolean) : undefined,
     };
     try {
-      if (existing) {
-        await updateQuestion(existing.id, base);
-      } else {
-        await createQuestion(base as any, profile.uid);
-      }
-      onSaved();
+      const saved = existing
+        ? await updateQuestion(existing.id, base)
+        : await createQuestion(base as any, profile.uid);
+      onSaved(saved);
+    } catch (err) {
+      setError(friendlyError(err));
     } finally {
       setSaving(false);
     }
@@ -188,6 +197,12 @@ export function QuestionForm({
         <label className="mb-1 block text-sm font-medium">Notes (optional)</label>
         <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)} />
       </div>
+
+      {error && (
+        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+          {error}
+        </div>
+      )}
 
       <button type="submit" className="btn-primary w-full" disabled={saving}>
         {saving ? "Saving..." : existing ? "Save changes" : "Add question"}

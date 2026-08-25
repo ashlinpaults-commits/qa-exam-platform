@@ -13,7 +13,7 @@ import {
 import { SortableContext, verticalListSortingStrategy, arrayMove } from "@dnd-kit/sortable";
 import { QuestionBankBrowser } from "@/components/questions/QuestionBankBrowser";
 import { SortableQuestionItem } from "./SortableQuestionItem";
-import { getQuestion } from "@/lib/questions";
+import { getQuestionsByIds } from "@/lib/questions";
 import { createExam, updateExam, getExam } from "@/lib/exams";
 import { useAuth } from "@/context/AuthContext";
 import type { Question, Exam, ExamMode, ExamStatus } from "@/types";
@@ -30,6 +30,7 @@ export function ExamBuilder({ examId }: { examId?: string }) {
   const [selected, setSelected] = useState<Question[]>([]);
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(!examId);
+  const [error, setError] = useState("");
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
@@ -42,10 +43,10 @@ export function ExamBuilder({ examId }: { examId?: string }) {
       setDescription(exam.description);
       setMode(exam.mode);
       setStatus(exam.status);
-      const qs = await Promise.all(
-        exam.questions.sort((a, b) => a.order - b.order).map((r) => getQuestion(r.questionId))
-      );
-      setSelected(qs.filter(Boolean) as Question[]);
+      const refs = [...exam.questions].sort((a, b) => a.order - b.order);
+      const qs = await getQuestionsByIds(refs.map((r) => r.questionId));
+      const byId = new Map(qs.map((q) => [q.id, q]));
+      setSelected(refs.map((r) => byId.get(r.questionId)).filter(Boolean) as Question[]);
       setLoaded(true);
     })();
   }, [examId]);
@@ -67,12 +68,23 @@ export function ExamBuilder({ examId }: { examId?: string }) {
   async function handleSave(publish: boolean) {
     if (!profile || !name.trim() || selected.length === 0) return;
     setSaving(true);
+    // Keep answer keys out of the exam document: agents can read published
+    // exams, while only auditors can read `questions`.
+    const questionSnapshots = Object.fromEntries(selected.map((q) => {
+      const { correctOptionIndex: _correctOptionIndex, ...safeQuestion } = q;
+      return [q.id, {
+        ...safeQuestion,
+        expectedAnswer: "",
+        stats: { timesAsked: 0, avgMarks: 0, correctPct: 0, incorrectPct: 0 },
+      }];
+    }));
     const payload = {
       name: name.trim(),
       description: description.trim(),
       mode,
       status: publish ? ("published" as const) : status === "published" ? status : ("draft" as const),
       questions: selected.map((q, i) => ({ questionId: q.id, order: i })),
+      questionSnapshots,
       assignedAgentIds: [] as string[],
     };
     try {
@@ -84,6 +96,9 @@ export function ExamBuilder({ examId }: { examId?: string }) {
         return;
       }
       router.push("/auditor/exams");
+    } catch (err) {
+      console.error("Failed to save exam", err);
+      setError(err instanceof Error ? err.message : "Couldn't save exam. Please retry.");
     } finally {
       setSaving(false);
     }
@@ -93,6 +108,7 @@ export function ExamBuilder({ examId }: { examId?: string }) {
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      {error && <div className="fixed right-4 top-4 z-50 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>}
       <div>
         <h2 className="mb-3 font-semibold">Question Bank</h2>
         <QuestionBankBrowser

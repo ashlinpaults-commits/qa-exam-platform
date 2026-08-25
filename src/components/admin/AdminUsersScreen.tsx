@@ -10,6 +10,7 @@ export function AdminUsersScreen() {
   const { profile } = useAuth();
   const [users, setUsers] = useState<AppUser[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   async function load() {
     setLoading(true);
@@ -25,13 +26,40 @@ export function AdminUsersScreen() {
     if (u.uid === profile?.uid) {
       if (!confirm("You're about to change your own role, which may lock you out of this screen. Continue?")) return;
     }
-    await setUserRole(u.uid, u.role === "auditor" ? "agent" : "auditor");
-    load();
+    const newRole = u.role === "auditor" ? "agent" : "auditor";
+
+    // Firestore rules let any auditor change any role — nothing server-side
+    // stops the last auditor from being demoted and locking everyone out
+    // of admin/review screens. Guard against that here client-side.
+    if (u.role === "auditor" && newRole === "agent") {
+      const remainingAuditors = users.filter(
+        (x) => x.role === "auditor" && x.uid !== u.uid
+      ).length;
+      if (remainingAuditors === 0) {
+        setError("Can't remove the last auditor — this would lock everyone out of review and admin screens.");
+        return;
+      }
+    }
+
+    setError("");
+    try {
+      await setUserRole(u.uid, newRole);
+      setUsers((prev) => prev.map((x) => (x.uid === u.uid ? { ...x, role: newRole } : x)));
+    } catch (err) {
+      console.error("Failed to change role", err);
+      setError(err instanceof Error ? err.message : "Couldn't change role. Please retry.");
+    }
   }
 
   if (loading) return <p className="text-sm text-slate-400">Loading users...</p>;
 
   return (
+    <div>
+      {error && (
+        <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+          {error}
+        </div>
+      )}
     <div className="card overflow-hidden">
       <table className="w-full text-left text-sm">
         <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-800">
@@ -57,6 +85,7 @@ export function AdminUsersScreen() {
           ))}
         </tbody>
       </table>
+    </div>
     </div>
   );
 }

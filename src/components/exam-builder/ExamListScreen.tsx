@@ -25,8 +25,14 @@ export function ExamListScreen() {
 
   async function load() {
     setLoading(true);
-    setExams(await fetchExams());
-    setLoading(false);
+    try {
+      setExams(await fetchExams());
+    } catch (error) {
+      console.error("Failed to load exams", error);
+      alert(error instanceof Error ? error.message : "Couldn't load exams. Please retry.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -35,19 +41,31 @@ export function ExamListScreen() {
 
   async function handleDuplicate(id: string) {
     if (!profile) return;
-    await duplicateExam(id, profile.uid);
-    load();
+    try {
+      const copy = await duplicateExam(id, profile.uid);
+      setExams((prev) => [copy, ...prev]);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Couldn't duplicate exam.");
+    }
   }
 
   async function handleArchive(id: string) {
-    await updateExam(id, { status: "archived" });
-    load();
+    try {
+      await updateExam(id, { status: "archived" });
+      setExams((prev) => prev.map((e) => (e.id === id ? { ...e, status: "archived" } : e)));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Couldn't archive exam.");
+    }
   }
 
   async function handleDelete(id: string) {
     if (!confirm("Delete this exam and its config permanently? Attempts are kept for records.")) return;
-    await deleteExam(id);
-    load();
+    try {
+      await deleteExam(id);
+      setExams((prev) => prev.filter((e) => e.id !== id));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Couldn't delete exam.");
+    }
   }
 
   return (
@@ -98,9 +116,9 @@ export function ExamListScreen() {
         {assigning && (
           <AssignAgentsModal
             exam={assigning}
-            onDone={() => {
+            onDone={(patch) => {
+              setExams((prev) => prev.map((e) => (e.id === assigning.id ? { ...e, ...patch } : e)));
               setAssigning(null);
-              load();
             }}
           />
         )}
