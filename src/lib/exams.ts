@@ -51,20 +51,22 @@ export async function deleteExam(id: string) {
   await deleteDoc(doc(db, COL, id));
 }
 
-export async function duplicateExam(examId: string, createdBy: string): Promise<string> {
+export async function duplicateExam(examId: string, createdBy: string): Promise<Exam> {
   const original = await getExam(examId);
   if (!original) throw new Error("Exam not found");
   const { id: _drop, ...rest } = original;
-  const ref = await addDoc(collection(db, COL), {
+  const now = Date.now();
+  const newPayload = {
     ...rest,
     name: `${original.name} (Copy)`,
     status: "draft" as const,
     assignedAgentIds: [],
     createdBy,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  });
-  return ref.id;
+    createdAt: now,
+    updatedAt: now,
+  };
+  const ref = await addDoc(collection(db, COL), newPayload);
+  return { id: ref.id, ...newPayload };
 }
 
 export function reorderQuestions(refs: ExamQuestionRef[], fromIndex: number, toIndex: number): ExamQuestionRef[] {

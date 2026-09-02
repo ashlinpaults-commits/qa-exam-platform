@@ -112,7 +112,7 @@ export function ExcelImportModal({ open, onClose, onImported }: { open: boolean;
               </div>
               <div>
                 <p className="text-xl font-semibold text-amber-500">{parsed.duplicates.length}</p>
-                <p className="text-xs text-slate-500">Duplicate Question No.</p>
+                <p className="text-xs text-slate-500">Duplicate Question Text</p>
               </div>
               <div>
                 <p className="text-xl font-semibold text-slate-400">{parsed.skippedCount}</p>
@@ -131,11 +131,11 @@ export function ExcelImportModal({ open, onClose, onImported }: { open: boolean;
             {parsed.duplicates.length > 0 && (
               <details className="rounded-lg bg-amber-50 p-3 text-xs dark:bg-amber-900/20">
                 <summary className="cursor-pointer font-medium">
-                  View {parsed.duplicates.length} duplicate Question No.(s) — these will NOT be uploaded
+                  View {parsed.duplicates.length} duplicate question(s) — these will NOT be uploaded
                 </summary>
                 <ul className="mt-2 max-h-32 space-y-0.5 overflow-y-auto">
                   {parsed.duplicates.slice(0, 100).map((d, i) => (
-                    <li key={i}>{d.module} — Question No. {d.questionNo}: {d.questionText.slice(0, 60)}...</li>
+                    <li key={i}>{d.module} — {d.questionText.slice(0, 80)}...</li>
                   ))}
                 </ul>
               </details>
@@ -157,7 +157,7 @@ export function ExcelImportModal({ open, onClose, onImported }: { open: boolean;
                       <td className="p-2">{r.module}</td>
                       <td className="p-2">{r.feature}</td>
                       <td className="p-2 capitalize">{r.difficulty}</td>
-                      <td className="max-w-xs truncate p-2">{r.questionText}</td>
+                      <td className="max-w-md p-2 whitespace-pre-wrap text-slate-700 dark:text-slate-200">{r.questionText}</td>
                     </tr>
                   ))}
                 </tbody>

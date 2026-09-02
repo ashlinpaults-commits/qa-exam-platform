@@ -1,5 +1,14 @@
 export type UserRole = "auditor" | "agent";
 
+export interface SystemSettings {
+  orgName: string;
+  defaultExamMode: "normal" | "until_perfect";
+  correctAnswerThreshold: number;
+  enableQuestionVersioning: boolean;
+  updatedAt?: number;
+  updatedBy?: string;
+}
+
 export interface AppUser {
   uid: string;
   email: string;
@@ -8,6 +17,22 @@ export interface AppUser {
   photoURL?: string;
   streamId?: string;
   assignedTrainerId?: string;
+  deactivated?: boolean;
+  deactivatedAt?: number;
+  createdAt: number;
+}
+
+export type AppNotificationType = "exam_assigned" | "review_completed" | "general";
+
+export interface AppNotification {
+  id: string;
+  userId: string;
+  type: AppNotificationType;
+  title: string;
+  message: string;
+  link?: string;
+  examId?: string;
+  read: boolean;
   createdAt: number;
 }
 
@@ -17,7 +42,8 @@ export type QuestionType =
   | "true_false"
   | "image_based"
   | "case_study"
-  | "drag_drop_order";
+  | "drag_drop_order"
+  | "screen_recording";
 
 export type Difficulty = "easy" | "medium" | "hard";
 
@@ -55,6 +81,27 @@ export interface Question {
     correctPct: number;
     incorrectPct: number;
   };
+}
+
+export interface QuestionVersion {
+  id: string;
+  questionId: string;
+  version: number;
+  module: string;
+  feature: string;
+  difficulty: Difficulty;
+  tags: string[];
+  type: QuestionType;
+  questionText: string;
+  expectedAnswer: string;
+  notes?: string;
+  options?: string[];
+  correctOptionIndex?: number;
+  imageUrl?: string;
+  caseStudyContext?: string;
+  orderItems?: string[];
+  updatedAt: number;
+  updatedBy?: string;
 }
 
 /* =========================================================
@@ -240,9 +287,22 @@ export interface ScoreHistoryEntry {
   timestamp: number;
 }
 
+export interface RecordingMetadata {
+  source: "upload" | "external_link";
+  fileSize?: number;
+  duration?: number;
+  uploadedAt: number;
+  fileName?: string;
+  mimeType?: string;
+}
+
 export interface AttemptAnswer {
   questionId: string;
   agentAnswer: string;
+
+  // Screen recording fields
+  recordingUrl?: string;
+  recordingMeta?: RecordingMetadata;
 
   // Filled by auditor
   marks?: number;
@@ -316,4 +376,21 @@ export interface ExamAttempt {
   // Prevents finalized analytics from being counted
   // more than once for the same attempt.
   analyticsFinalized?: boolean;
+
+  /* -------------------------
+     Archiving
+     ------------------------- */
+
+  // Marks an attempt as archived/excluded from applicable active analytics.
+  archived?: boolean;
+  archivedAt?: number;
+
+  /* -------------------------
+     Retake tracking
+     ------------------------- */
+
+  // Indicates this attempt only covers a subset of questions (wrong/imperfect answers from a prior attempt).
+  isRetake?: boolean;
+  retakeOfAttemptId?: string;
+  retakeQuestionIds?: string[];
 }

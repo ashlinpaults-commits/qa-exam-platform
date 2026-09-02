@@ -8,6 +8,7 @@ import { startAttempt, saveAnswer, submitAttempt, getAttempt } from "@/lib/attem
 import { useAuth } from "@/context/AuthContext";
 import type { Exam, Question, ExamAttempt } from "@/types";
 import { AnswerInput } from "@/components/questions/AnswerInput";
+import { MarkdownRenderer } from "@/components/ui/Primitives";
 import { Loader2, ChevronLeft, ChevronRight, Check } from "lucide-react";
 
 // Debounce autosave so we don't write to Firestore on every keystroke.
@@ -107,11 +108,15 @@ export function TakeExam({ examId }: { examId: string }) {
         <p className="mb-1 text-xs font-medium uppercase tracking-wide text-brand-600">
           {current.module} · {current.feature}
         </p>
-        <h2 className="mb-4 text-lg font-medium">{current.questionText}</h2>
+        <div className="mb-4 text-lg font-medium text-slate-900 dark:text-slate-100">
+          <MarkdownRenderer content={current.questionText} />
+        </div>
         <AnswerInput
           question={current}
           value={answers[current.id] ?? ""}
           onChange={(v) => setAnswers((prev) => ({ ...prev, [current.id]: v }))}
+          examId={examId}
+          attemptId={attempt?.id}
         />
       </div>
 

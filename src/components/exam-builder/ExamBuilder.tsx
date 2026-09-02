@@ -13,12 +13,12 @@ import {
 import { SortableContext, verticalListSortingStrategy, arrayMove } from "@dnd-kit/sortable";
 import { QuestionBankBrowser } from "@/components/questions/QuestionBankBrowser";
 import { SortableQuestionItem } from "./SortableQuestionItem";
-import { getQuestion } from "@/lib/questions";
+import { getQuestionsByIds } from "@/lib/questions";
 import { createExam, updateExam, getExam } from "@/lib/exams";
 import { useAuth } from "@/context/AuthContext";
 import type { Question, Exam, ExamMode, ExamStatus } from "@/types";
 import { EmptyState } from "@/components/ui/Primitives";
-import { Save, Rocket } from "lucide-react";
+import { Save, Rocket, AlertTriangle } from "lucide-react";
 
 export function ExamBuilder({ examId }: { examId?: string }) {
   const { profile } = useAuth();
@@ -29,6 +29,7 @@ export function ExamBuilder({ examId }: { examId?: string }) {
   const [status, setStatus] = useState<ExamStatus>("draft");
   const [selected, setSelected] = useState<Question[]>([]);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(!examId);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
@@ -42,10 +43,11 @@ export function ExamBuilder({ examId }: { examId?: string }) {
       setDescription(exam.description);
       setMode(exam.mode);
       setStatus(exam.status);
-      const qs = await Promise.all(
-        exam.questions.sort((a, b) => a.order - b.order).map((r) => getQuestion(r.questionId))
-      );
-      setSelected(qs.filter(Boolean) as Question[]);
+      const orderedIds = exam.questions.sort((a, b) => a.order - b.order).map((r) => r.questionId);
+      const qs = await getQuestionsByIds(orderedIds);
+      const qMap = new Map(qs.map((q) => [q.id, q]));
+      const orderedQuestions = orderedIds.map((id) => qMap.get(id)).filter(Boolean) as Question[];
+      setSelected(orderedQuestions);
       setLoaded(true);
     })();
   }, [examId]);
@@ -66,6 +68,7 @@ export function ExamBuilder({ examId }: { examId?: string }) {
 
   async function handleSave(publish: boolean) {
     if (!profile || !name.trim() || selected.length === 0) return;
+    setError(null);
     setSaving(true);
     const payload = {
       name: name.trim(),
@@ -84,6 +87,9 @@ export function ExamBuilder({ examId }: { examId?: string }) {
         return;
       }
       router.push("/auditor/exams");
+    } catch (err) {
+      console.error("Failed to save exam:", err);
+      setError(err instanceof Error ? err.message : "Failed to save exam.");
     } finally {
       setSaving(false);
     }
@@ -103,6 +109,12 @@ export function ExamBuilder({ examId }: { examId?: string }) {
       </div>
 
       <div>
+        {error && (
+          <div className="mb-4 flex items-start gap-2 rounded-xl bg-red-50 p-3 text-sm text-red-600 dark:bg-red-900/30 dark:text-red-400">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
         <div className="card mb-4 space-y-3 p-4">
           <input className="input font-medium" placeholder="Exam name" value={name} onChange={(e) => setName(e.target.value)} />
           <textarea className="input" placeholder="Description" value={description} onChange={(e) => setDescription(e.target.value)} />

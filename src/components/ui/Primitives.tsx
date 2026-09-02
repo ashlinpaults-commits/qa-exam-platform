@@ -8,7 +8,7 @@ export function Badge({
   color = "slate",
 }: {
   children: ReactNode;
-  color?: "slate" | "brand" | "green" | "amber" | "red";
+  color?: "slate" | "brand" | "green" | "amber" | "red" | "purple";
 }) {
   const colors: Record<string, string> = {
     slate: "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300",
@@ -16,6 +16,7 @@ export function Badge({
     green: "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
     amber: "bg-amber-50 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
     red: "bg-red-50 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+    purple: "bg-purple-50 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300",
   };
   return (
     <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${colors[color]}`}>
@@ -71,3 +72,6 @@ export function EmptyState({ title, subtitle }: { title: string; subtitle?: stri
     </div>
   );
 }
+
+export { MarkdownRenderer, MarkdownEditor } from "./MarkdownRenderer";
+

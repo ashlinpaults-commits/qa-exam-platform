@@ -85,23 +85,25 @@ export function AgentDashboardContent() {
    * reviewed          -> Official completed attempt
    */
 
-  const inProgress = attempts.filter(
+  const activeAttempts = attempts.filter((a) => !a.archived);
+
+  const inProgress = activeAttempts.filter(
     (attempt) => attempt.status === "in_progress"
   );
 
-  const awaitingReview = attempts.filter(
+  const awaitingReview = activeAttempts.filter(
     (attempt) =>
       attempt.status === "submitted" ||
       attempt.status === "review_in_progress"
   );
 
-  const reviewed = attempts.filter(
+  const reviewed = activeAttempts.filter(
     (attempt) =>
       attempt.status === "reviewed" &&
       Boolean(attempt.maxTotalMarks)
   );
 
-  const completed = attempts.filter(
+  const completed = activeAttempts.filter(
     (attempt) => attempt.status === "reviewed"
   );
 
@@ -111,24 +113,49 @@ export function AgentDashboardContent() {
    * -------------------------------------------------------
    */
 
-  const overallScorePct = reviewed.length
-    ? Math.round(
-        (reviewed.reduce(
-          (sum, attempt) =>
-            sum +
-            (attempt.totalMarks ?? 0) /
-              (attempt.maxTotalMarks ?? 1),
-          0
-        ) /
-          reviewed.length) *
-          100
-      )
-    : 0;
+  // Compute overall score by taking the latest reviewed answer for each unique question
+  const latestAnswerMap = new Map<
+    string,
+    { marks: number; maxMarks: number; examId: string }
+  >();
 
-  const perfectExams = reviewed.filter(
-    (attempt) =>
-      attempt.totalMarks === attempt.maxTotalMarks
-  ).length;
+  const sortedReviewed = [...reviewed].sort(
+    (a, b) => (a.reviewedAt ?? a.startedAt) - (b.reviewedAt ?? b.startedAt)
+  );
+
+  sortedReviewed.forEach((attempt) => {
+    attempt.answers.forEach((ans) => {
+      if (ans.marks !== undefined) {
+        latestAnswerMap.set(ans.questionId, {
+          marks: ans.marks,
+          maxMarks: ans.maxMarks,
+          examId: attempt.examId,
+        });
+      }
+    });
+  });
+
+  const totalAgentMarks = Array.from(latestAnswerMap.values()).reduce(
+    (sum, a) => sum + a.marks,
+    0
+  );
+  const totalAgentMaxMarks = Array.from(latestAnswerMap.values()).reduce(
+    (sum, a) => sum + a.maxMarks,
+    0
+  );
+
+  const overallScorePct =
+    totalAgentMaxMarks > 0
+      ? Math.round((totalAgentMarks / totalAgentMaxMarks) * 100)
+      : 0;
+
+  const perfectExams = exams.filter((exam) => {
+    const examAnswers = Array.from(latestAnswerMap.values()).filter(
+      (a) => a.examId === exam.id
+    );
+    if (examAnswers.length === 0) return false;
+    return examAnswers.every((a) => a.marks === a.maxMarks);
+  }).length;
 
   const examScoreByExam: Record<
     string,
@@ -138,11 +165,8 @@ export function AgentDashboardContent() {
     }
   > = {};
 
-  reviewed.forEach((attempt) => {
-    const exam = exams.find(
-      (item) => item.id === attempt.examId
-    );
-
+  latestAnswerMap.forEach((val) => {
+    const exam = exams.find((item) => item.id === val.examId);
     if (!exam) return;
 
     const current = examScoreByExam[exam.name] ?? {
@@ -150,9 +174,8 @@ export function AgentDashboardContent() {
       max: 0,
     };
 
-    current.total += attempt.totalMarks ?? 0;
-    current.max += attempt.maxTotalMarks ?? 0;
-
+    current.total += val.marks;
+    current.max += val.maxMarks;
     examScoreByExam[exam.name] = current;
   });
 
@@ -486,13 +509,24 @@ export function AgentDashboardContent() {
                   className="card flex items-center justify-between gap-4 p-4"
                 >
                   <div>
-                    <p className="font-medium">
-                      {exam?.name ?? "Exam"} — Attempt #
-                      {attempt.attemptNumber}
-                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium">
+                        {exam?.name ?? "Exam"} — Attempt #
+                        {attempt.attemptNumber}
+                      </p>
+
+                      {attempt.isRetake && (
+                        <Badge color="purple">Retake assigned by auditor</Badge>
+                      )}
+                    </div>
 
                     <p className="mt-1 text-sm text-slate-500">
-                      Continue where you left off.
+                      {attempt.isRetake
+                        ? `Targeted retake: Answer the ${
+                            attempt.retakeQuestionIds?.length ??
+                            attempt.answers.length
+                          } question(s) assigned for review.`
+                        : "Continue where you left off."}
                     </p>
                   </div>
 
@@ -530,10 +564,16 @@ export function AgentDashboardContent() {
                   className="card flex items-center justify-between gap-4 p-4"
                 >
                   <div>
-                    <p className="font-medium">
-                      {exam?.name ?? "Exam"} — Attempt #
-                      {attempt.attemptNumber}
-                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium">
+                        {exam?.name ?? "Exam"} — Attempt #
+                        {attempt.attemptNumber}
+                      </p>
+
+                      {attempt.isRetake && (
+                        <Badge color="amber">Retake (wrong answers only)</Badge>
+                      )}
+                    </div>
 
                     <p className="mt-1 text-sm text-slate-500">
                       {attempt.status ===
@@ -588,13 +628,24 @@ export function AgentDashboardContent() {
                     className="card flex items-center justify-between gap-4 p-4"
                   >
                     <div>
-                      <p className="font-medium">
-                        {exam?.name ?? "Exam"} — Attempt #
-                        {attempt.attemptNumber}
-                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-medium">
+                          {exam?.name ?? "Exam"} — Attempt #
+                          {attempt.attemptNumber}
+                        </p>
+
+                        {attempt.isRetake && (
+                          <Badge color="amber">Retake (wrong answers only)</Badge>
+                        )}
+                      </div>
 
                       <p className="mt-1 text-sm text-slate-500">
-                        Review completed
+                        {attempt.isRetake
+                          ? `Retake review completed (${
+                              attempt.retakeQuestionIds?.length ??
+                              attempt.answers.length
+                            } questions)`
+                          : "Review completed"}
                       </p>
                     </div>
 

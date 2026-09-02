@@ -83,14 +83,19 @@ export function AnalyticsDashboard() {
     load();
   }, []);
 
+  const activeAttempts = useMemo(
+    () => attempts.filter((attempt) => !attempt.archived),
+    [attempts]
+  );
+
   const competencies = useMemo(
     () =>
       calculateAllAgentCompetencies({
-        attempts,
+        attempts: activeAttempts,
         questions,
         users,
       }),
-    [attempts, questions, users]
+    [activeAttempts, questions, users]
   );
   const coachingAssessments = useMemo(
   () => calculateAllCoachingAssessments(competencies),
@@ -162,7 +167,7 @@ const coachingCounts = useMemo(
     (sum, exam) => {
       const pendingForExam =
         exam.assignedAgentIds.filter((agentId) => {
-          const agentAttempts = attempts.filter(
+          const agentAttempts = activeAttempts.filter(
             (attempt) =>
               attempt.examId === exam.id &&
               attempt.agentId === agentId
@@ -182,7 +187,7 @@ const coachingCounts = useMemo(
   );
 
   const agentsAssessed = new Set(
-    attempts
+    activeAttempts
       .filter((attempt) => attempt.status === "reviewed")
       .map((attempt) => attempt.agentId)
   ).size;
@@ -203,7 +208,7 @@ const coachingCounts = useMemo(
     }
   >();
 
-  const reviewedChronological = [...attempts]
+  const reviewedChronological = [...activeAttempts]
     .filter((attempt) => attempt.status === "reviewed")
     .sort(
       (a, b) =>
@@ -279,7 +284,7 @@ const coachingCounts = useMemo(
     }
   >();
 
-  attempts
+  activeAttempts
     .filter((attempt) => attempt.status === "reviewed")
     .forEach((attempt) => {
       attempt.answers.forEach((answer) => {
@@ -1012,7 +1017,14 @@ function AgentHistoryModal({
                             {ordered.map((attempt) => (
                               <tr key={attempt.id}>
                                 <td className="py-2">
-                                  #{attempt.attemptNumber}
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span>#{attempt.attemptNumber}</span>
+                                    {attempt.isRetake && (
+                                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+                                        Retake ({attempt.retakeQuestionIds?.length ?? attempt.answers.length} Qs)
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
 
                                 <td className="py-2 font-medium">

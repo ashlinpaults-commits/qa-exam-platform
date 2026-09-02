@@ -17,8 +17,10 @@ import { getQuestion } from "./questions";
 import type {
   ExamAttempt,
   AttemptAnswer,
+  RecordingMetadata,
   Exam,
   KnowledgeGapCategory,
+  Question,
 } from "@/types";
 
 const COL = "attempts";
@@ -306,6 +308,21 @@ export async function startAttempt(
     }
   );
 
+  /*
+   * Automatically transition exam from published -> active on first attempt.
+   */
+  if (exam.status === "published") {
+    try {
+      await updateDoc(doc(db, "exams", exam.id), {
+        status: "active",
+        updatedAt: Date.now(),
+      });
+      exam.status = "active";
+    } catch (err) {
+      console.error("Failed to auto-transition exam to active:", err);
+    }
+  }
+
   return attemptId;
 }
 
@@ -317,27 +334,149 @@ export async function saveAnswer(
   attemptId: string,
   questionId: string,
   agentAnswer: string,
-  allAnswers: AttemptAnswer[]
+  allAnswers: AttemptAnswer[],
+  recordingUrl?: string,
+  recordingMeta?: RecordingMetadata
 ) {
-  const updated =
-    allAnswers.map((answer) =>
-      answer.questionId ===
-      questionId
-        ? {
-            ...answer,
-            agentAnswer,
-          }
-        : answer
-    );
+  const updated = allAnswers.map((answer) => {
+    if (answer.questionId === questionId) {
+      const next: AttemptAnswer = {
+        ...answer,
+        agentAnswer,
+      };
 
-  await updateDoc(
-    doc(db, COL, attemptId),
-    {
-      answers: updated,
+      if (recordingUrl !== undefined) {
+        next.recordingUrl = recordingUrl;
+      }
+      if (recordingMeta !== undefined) {
+        next.recordingMeta = recordingMeta;
+      } else if (agentAnswer.startsWith("{") && agentAnswer.includes("recordingUrl")) {
+        try {
+          const parsed = JSON.parse(agentAnswer);
+          if (parsed.recordingUrl) {
+            next.recordingUrl = parsed.recordingUrl;
+            next.recordingMeta = {
+              source: parsed.source || "upload",
+              fileSize: parsed.fileSize,
+              duration: parsed.duration,
+              uploadedAt: parsed.uploadedAt || Date.now(),
+              fileName: parsed.fileName,
+              mimeType: parsed.mimeType,
+            };
+          }
+        } catch {
+          // Ignore JSON parse errors
+        }
+      }
+      return next;
     }
-  );
+    return answer;
+  });
+
+  await updateDoc(doc(db, COL, attemptId), {
+    answers: updated,
+  });
 
   return updated;
+}
+
+/* =========================================================
+   AUTO-SCORE OBJECTIVE QUESTIONS
+   ========================================================= */
+
+/**
+ * Auto-scores objective question types (mcq, true_false, drag_drop_order).
+ * Returns the updated answer with marks populated and a scoreHistory entry.
+ * If the question is subjective (descriptive, case_study, image_based), returns answer unchanged.
+ */
+export function autoScoreAnswer(
+  answer: AttemptAnswer,
+  question: Question
+): AttemptAnswer {
+  // Only auto-score mcq, true_false, and drag_drop_order
+  if (
+    question.type !== "mcq" &&
+    question.type !== "true_false" &&
+    question.type !== "drag_drop_order"
+  ) {
+    return answer;
+  }
+
+  const agentAnswer = (answer.agentAnswer || "").trim();
+  let isCorrect = false;
+
+  if (question.type === "mcq") {
+    if (question.correctOptionIndex !== undefined && question.correctOptionIndex !== null) {
+      const chosenIndex = Number(agentAnswer);
+      if (!isNaN(chosenIndex) && chosenIndex === question.correctOptionIndex) {
+        isCorrect = true;
+      } else if (
+        question.options &&
+        question.options[question.correctOptionIndex] !== undefined &&
+        agentAnswer.toLowerCase() === question.options[question.correctOptionIndex].trim().toLowerCase()
+      ) {
+        isCorrect = true;
+      }
+    } else if (question.expectedAnswer) {
+      isCorrect = agentAnswer.toLowerCase() === question.expectedAnswer.trim().toLowerCase();
+    }
+  } else if (question.type === "true_false") {
+    const norm = agentAnswer.toLowerCase();
+    if (question.correctOptionIndex !== undefined && question.correctOptionIndex !== null && question.options) {
+      const correctText = (question.options[question.correctOptionIndex] || "").trim().toLowerCase();
+      const chosenIndex = Number(agentAnswer);
+      if (!isNaN(chosenIndex) && chosenIndex === question.correctOptionIndex) {
+        isCorrect = true;
+      } else if (norm === correctText) {
+        isCorrect = true;
+      }
+    } else if (question.expectedAnswer) {
+      const exp = question.expectedAnswer.trim().toLowerCase();
+      isCorrect =
+        norm === exp ||
+        (norm === "true" && (exp === "true" || exp === "t" || exp === "1")) ||
+        (norm === "false" && (exp === "false" || exp === "f" || exp === "0"));
+    }
+  } else if (question.type === "drag_drop_order") {
+    if (question.orderItems && question.orderItems.length > 0) {
+      let agentItems: string[] = [];
+      try {
+        const parsed = JSON.parse(agentAnswer);
+        if (Array.isArray(parsed)) {
+          agentItems = parsed.map((item) => String(item).trim());
+        }
+      } catch {
+        agentItems = agentAnswer.split("\n").map((s) => s.trim()).filter(Boolean);
+        if (agentItems.length === 1 && agentItems[0].includes(",")) {
+          agentItems = agentItems[0].split(",").map((s) => s.trim());
+        }
+      }
+
+      if (
+        agentItems.length === question.orderItems.length &&
+        agentItems.every(
+          (item, idx) =>
+            item.toLowerCase() === (question.orderItems![idx] || "").trim().toLowerCase()
+        )
+      ) {
+        isCorrect = true;
+      }
+    }
+  }
+
+  const marks = isCorrect ? answer.maxMarks : 0;
+  const historyEntry = {
+    marks,
+    changedBy: "system",
+    reason: "auto-scored",
+    timestamp: Date.now(),
+  };
+
+  return {
+    ...answer,
+    marks,
+    scoreHistory: [...(answer.scoreHistory || []), historyEntry],
+  };
 }
 
 /* =========================================================
@@ -391,14 +530,32 @@ export async function submitAttempt(
       (now - startedAt) / 1000
     );
 
+  // Auto-score objective answers at submission time
+  const scoredAnswers = await Promise.all(
+    attempt.answers.map(async (ans) => {
+      try {
+        const q = await getQuestion(ans.questionId);
+        if (!q) return ans;
+        return autoScoreAnswer(ans, q);
+      } catch (err) {
+        console.error(`Auto-score failed for question ${ans.questionId}:`, err);
+        return ans;
+      }
+    })
+  );
+
   await updateDoc(
     doc(db, COL, attemptId),
     {
+      answers: scoredAnswers,
       status: "submitted",
       submittedAt: now,
       timeTakenSeconds,
     }
   );
+
+  // Check if all assigned agents have now completed
+  checkAndTransitionExamCompletion(attempt.examId).catch(console.error);
 }
 
 /* =========================================================
@@ -528,7 +685,10 @@ export async function saveReviewDraft(
     updateData
   );
 
-  return answers;
+  return {
+    ...attempt,
+    ...updateData,
+  };
 }
 
 /* =========================================================
@@ -771,5 +931,142 @@ export async function finalizeReview(
     );
   }
 
+  // Check if all assigned agents have completed their exam
+  checkAndTransitionExamCompletion(attempt.examId).catch(console.error);
+
   return finalized;
+}
+
+/* =========================================================
+   ATTEMPT ARCHIVE / UNARCHIVE
+   ========================================================= */
+
+/**
+ * Non-destructively archive an attempt.
+ *
+ * The attempt document remains stored in Firestore with all answers,
+ * scores, remarks, and audit history intact. It is excluded from
+ * applicable active analytics calculations.
+ */
+export async function archiveAttempt(attemptId: string): Promise<void> {
+  await updateDoc(doc(db, COL, attemptId), {
+    archived: true,
+    archivedAt: Date.now(),
+  });
+}
+
+/**
+ * Restore an archived attempt back to active status.
+ */
+export async function unarchiveAttempt(attemptId: string): Promise<void> {
+  await updateDoc(doc(db, COL, attemptId), {
+    archived: false,
+    archivedAt: Date.now(),
+  });
+}
+
+/**
+ * Automatically transitions an exam to "completed" if all assigned agents
+ * have finished their required attempts.
+ */
+export async function checkAndTransitionExamCompletion(examId: string): Promise<void> {
+  try {
+    const examDoc = await getDoc(doc(db, "exams", examId));
+    if (!examDoc.exists()) return;
+    const examData = examDoc.data() as Exam;
+
+    if (
+      examData.status === "completed" ||
+      examData.status === "draft" ||
+      examData.status === "archived" ||
+      !examData.assignedAgentIds ||
+      examData.assignedAgentIds.length === 0
+    ) {
+      return;
+    }
+
+    const allAttempts = await fetchAttemptsForExam(examId);
+    const activeAttempts = allAttempts.filter((a) => !a.archived);
+
+    const allFinished = examData.assignedAgentIds.every((agentId) => {
+      const agentAttempts = activeAttempts.filter((a) => a.agentId === agentId);
+      if (agentAttempts.length === 0) return false;
+
+      if (examData.mode === "until_perfect") {
+        return agentAttempts.some(
+          (a) => a.status === "reviewed" && a.maxTotalMarks && a.totalMarks === a.maxTotalMarks
+        );
+      }
+
+      // Normal mode: finished if submitted, review in progress, or reviewed
+      return agentAttempts.some(
+        (a) => a.status === "submitted" || a.status === "review_in_progress" || a.status === "reviewed"
+      );
+    });
+
+    if (allFinished) {
+      await updateDoc(doc(db, "exams", examId), {
+        status: "completed",
+        updatedAt: Date.now(),
+      });
+    }
+  } catch (err) {
+    console.error("Failed to check exam completion transition:", err);
+  }
+}
+
+/**
+ * Reassigns wrong or imperfectly scored questions (< maxMarks) from a reviewed attempt
+ * to create a targeted retake attempt for the agent.
+ */
+export async function reassignWrongAnswers(
+  parentAttempt: ExamAttempt,
+  exam: Exam,
+  reassignedBy?: string
+): Promise<string> {
+  const wrongAnswers = parentAttempt.answers.filter(
+    (a) => (a.marks ?? 0) < a.maxMarks
+  );
+
+  if (wrongAnswers.length === 0) {
+    throw new Error("No imperfect answers found to reassign in this attempt.");
+  }
+
+  const retakeQuestionIds = wrongAnswers.map((a) => a.questionId);
+
+  // Fetch prior attempts for attempt numbering
+  const prior = await fetchAttemptsForAgent(parentAttempt.agentId, exam.id);
+  const attemptNumber =
+    prior.length > 0
+      ? Math.max(...prior.map((a) => a.attemptNumber)) + 1
+      : 1;
+
+  const answers: AttemptAnswer[] = wrongAnswers.map((a) => ({
+    questionId: a.questionId,
+    agentAnswer: "",
+    maxMarks: a.maxMarks,
+  }));
+
+  const attemptId = `${exam.id}_${parentAttempt.agentId}_${attemptNumber}`;
+  const attemptRef = doc(db, COL, attemptId);
+
+  await runTransaction(db, async (transaction) => {
+    const existing = await transaction.get(attemptRef);
+    if (existing.exists()) return;
+
+    transaction.set(attemptRef, {
+      examId: exam.id,
+      agentId: parentAttempt.agentId,
+      attemptNumber,
+      answers,
+      startedAt: Date.now(),
+      status: "in_progress",
+      analyticsFinalized: false,
+      isRetake: true,
+      retakeOfAttemptId: parentAttempt.id,
+      retakeQuestionIds,
+    });
+  });
+
+  return attemptId;
 }

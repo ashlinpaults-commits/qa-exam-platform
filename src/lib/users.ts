@@ -1,5 +1,15 @@
 import {
-  doc, getDoc, setDoc, updateDoc, collection, getDocs, query, where, orderBy, serverTimestamp,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  collection,
+  getDocs,
+  query,
+  where,
+  orderBy,
+  serverTimestamp,
 } from "firebase/firestore";
 import { db } from "./firebase";
 import type { AppUser, UserRole } from "@/types";
@@ -46,3 +56,19 @@ export async function fetchAllUsers(): Promise<AppUser[]> {
 export async function setUserRole(uid: string, role: UserRole) {
   await updateDoc(doc(db, USERS_COLLECTION, uid), { role });
 }
+
+export async function updateUserName(uid: string, name: string) {
+  await updateDoc(doc(db, USERS_COLLECTION, uid), { name: name.trim() });
+}
+
+export async function setUserDeactivated(uid: string, deactivated: boolean) {
+  await updateDoc(doc(db, USERS_COLLECTION, uid), {
+    deactivated,
+    deactivatedAt: deactivated ? Date.now() : null,
+  });
+}
+
+export async function deleteUserProfile(uid: string) {
+  await deleteDoc(doc(db, USERS_COLLECTION, uid));
+}
+

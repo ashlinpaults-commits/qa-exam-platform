@@ -112,7 +112,7 @@ export function calculateAgentCompetency({
   const agentAttempts = attempts
     .filter(
       (attempt) =>
-        attempt.agentId === agentId
+        attempt.agentId === agentId && !attempt.archived
     )
     .sort(
       (a, b) =>
@@ -473,47 +473,50 @@ export function calculateAgentCompetency({
      LEARNING VELOCITY
      ======================================================= */
 
-  const reviewedScores =
-    reviewedAttempts
-      .map((attempt) =>
-        getAttemptScorePercentage(
-          attempt
-        )
-      )
-      .filter(
-        (
-          score
-        ): score is number =>
-          score !== null
-      );
+  const runningScores: number[] = [];
+  const cumulativeAnswerMap = new Map<string, { marks: number; maxMarks: number }>();
+
+  for (const attempt of reviewedAttempts) {
+    for (const ans of attempt.answers) {
+      if (ans.marks !== undefined) {
+        cumulativeAnswerMap.set(ans.questionId, {
+          marks: ans.marks,
+          maxMarks: ans.maxMarks,
+        });
+      }
+    }
+    const totMarks = Array.from(cumulativeAnswerMap.values()).reduce(
+      (sum, v) => sum + v.marks,
+      0
+    );
+    const totMax = Array.from(cumulativeAnswerMap.values()).reduce(
+      (sum, v) => sum + v.maxMarks,
+      0
+    );
+    if (totMax > 0) {
+      runningScores.push(round((totMarks / totMax) * 100));
+    }
+  }
 
   const firstReviewedScore =
-    reviewedScores.length > 0
-      ? reviewedScores[0]
-      : null;
+    runningScores.length > 0 ? runningScores[0] : null;
 
   const latestReviewedScore =
-    reviewedScores.length > 0
-      ? reviewedScores[
-          reviewedScores.length - 1
-        ]
+    runningScores.length > 0
+      ? runningScores[runningScores.length - 1]
       : null;
 
   const learningVelocity =
     firstReviewedScore !== null &&
     latestReviewedScore !== null &&
-    reviewedScores.length >= 2
-      ? round(
-          latestReviewedScore -
-            firstReviewedScore
-        )
+    runningScores.length >= 2
+      ? round(latestReviewedScore - firstReviewedScore)
       : null;
 
-  const learningTrend =
-    calculateLearningTrend(
-      learningVelocity,
-      reviewedScores.length
-    );
+  const learningTrend = calculateLearningTrend(
+    learningVelocity,
+    runningScores.length
+  );
 
   /* =======================================================
      FINAL RESULT
@@ -580,9 +583,11 @@ export function calculateAllAgentCompetencies({
   questions: Question[];
   users: AppUser[];
 }): AgentCompetency[] {
+  const activeAttempts = attempts.filter((a) => !a.archived);
+
   const agentIds = Array.from(
     new Set(
-      attempts.map(
+      activeAttempts.map(
         (attempt) =>
           attempt.agentId
       )
@@ -594,7 +599,7 @@ export function calculateAllAgentCompetencies({
       calculateAgentCompetency({
         agentId,
 
-        attempts,
+        attempts: activeAttempts,
 
         questions,
 

@@ -15,13 +15,16 @@ import {
   Users,
   X,
   XCircle,
+  Download,
 } from "lucide-react";
 
 import { getExam } from "@/lib/exams";
 import { fetchAttemptsForExam } from "@/lib/attempts";
 import { fetchAllUsers } from "@/lib/users";
 import { getQuestionsByIds } from "@/lib/questions";
+import { exportAttemptsToExcel } from "@/lib/excelExport";
 
+import { AnswerDisplay } from "@/components/questions/AnswerDisplay";
 import type {
   AppUser,
   Exam,
@@ -33,6 +36,7 @@ import type {
 import {
   Badge,
   EmptyState,
+  MarkdownRenderer,
 } from "@/components/ui/Primitives";
 
 interface Props {
@@ -132,6 +136,24 @@ export function ExamResultsScreen({
 
     load();
   }, [examId]);
+
+  const usersById = useMemo(
+    () =>
+      users.reduce<Record<string, AppUser>>((acc, u) => {
+        acc[u.uid] = u;
+        return acc;
+      }, {}),
+    [users]
+  );
+
+  const questionsById = useMemo(
+    () =>
+      questions.reduce<Record<string, Question>>((acc, q) => {
+        acc[q.id] = q;
+        return acc;
+      }, {}),
+    [questions]
+  );
 
   /* =======================================================
      GROUP ATTEMPTS BY AGENT
@@ -333,21 +355,38 @@ export function ExamResultsScreen({
           </div>
         </div>
 
-        <div className="flex gap-3">
-  <Link
-    href={`/auditor/reports/${exam.id}`}
-    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700"
-  >
-    Generate Report
-  </Link>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            className="btn-secondary flex items-center gap-1.5"
+            onClick={() =>
+              exportAttemptsToExcel(
+                attempts,
+                exam,
+                usersById,
+                questionsById,
+                `${exam.name.replace(/[^a-zA-Z0-9_-]/g, "_")}_results.xlsx`
+              )
+            }
+            title="Export all attempts and responses to Excel"
+          >
+            <Download className="h-4 w-4" /> Export Excel
+          </button>
 
-  <Link
-    href={`/auditor/exams/${exam.id}/review`}
-    className="btn-primary"
-  >
-    Review Attempts
-  </Link>
-</div>
+          <Link
+            href={`/auditor/reports/${exam.id}`}
+            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700"
+          >
+            Generate Report
+          </Link>
+
+          <Link
+            href={`/auditor/exams/${exam.id}/review`}
+            className="btn-primary"
+          >
+            Review Attempts
+          </Link>
+        </div>
 
       </div>
 
@@ -679,6 +718,9 @@ function AttemptSymbol({
     !perfect;
 
   let label = `Attempt #${attempt.attemptNumber}`;
+  if (attempt.isRetake) {
+    label += " (Retake: wrong answers only)";
+  }
 
   if (perfect) {
     label += " - Complete";
@@ -984,17 +1026,32 @@ function AttemptDetailsModal({
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                  Attempt #
-                  {
-                    attempt.attemptNumber
-                  }
+                  Attempt #{attempt.attemptNumber}
                 </p>
+
+                {attempt.isRetake && (
+                  <Badge color="amber">Retake (wrong answers only)</Badge>
+                )}
 
                 <AttemptStatusBadge
                   attempt={attempt}
                   exam={exam}
                 />
               </div>
+
+              {attempt.isRetake && (
+                <div className="mt-2.5 rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-900 dark:border-amber-800/40 dark:bg-amber-950/20 dark:text-amber-300">
+                  <span className="font-semibold">Targeted Retake:</span> Covers{" "}
+                  <strong>{attempt.retakeQuestionIds?.length ?? attempt.answers.length}</strong> imperfect question(s) from{" "}
+                  <span>
+                    {previousAttempt
+                      ? `Attempt #${previousAttempt.attemptNumber}`
+                      : attempt.retakeOfAttemptId
+                      ? `parent Attempt (${attempt.retakeOfAttemptId.split("_").pop() || "source"})`
+                      : "source attempt"}
+                  </span>.
+                </div>
+              )}
 
               <h2 className="mt-2 text-xl font-semibold sm:text-2xl">
                 {agentName}
@@ -1285,10 +1342,14 @@ function QuestionAnalysisCard({
             />
           </div>
 
-          <p className="mt-2 line-clamp-2 text-sm font-medium text-slate-800 dark:text-slate-100">
-            {question?.questionText ??
-              "Question details unavailable"}
-          </p>
+          <div className="mt-2 text-sm font-medium text-slate-800 dark:text-slate-100">
+            <MarkdownRenderer
+              content={
+                question?.questionText ??
+                "Question details unavailable"
+              }
+            />
+          </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-3">
@@ -1325,6 +1386,7 @@ function QuestionAnalysisCard({
                 "(No answer provided)"
               }
               variant="agent"
+              question={question}
             />
 
             <AnswerBox
@@ -1794,12 +1856,14 @@ function AnswerBox({
   label,
   value,
   variant,
+  question,
 }: {
   label: string;
   value: string;
   variant:
     | "agent"
     | "expected";
+  question?: Question;
 }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
@@ -1807,9 +1871,15 @@ function AnswerBox({
         {label}
       </p>
 
-      <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-700 dark:text-slate-200">
-        {value}
-      </p>
+      <div className="mt-3 text-sm leading-6 text-slate-700 dark:text-slate-200">
+        {variant === "agent" && question ? (
+          <AnswerDisplay question={question} agentAnswer={value} />
+        ) : value.trim() ? (
+          <MarkdownRenderer content={value} />
+        ) : (
+          <p className="italic text-slate-400">None</p>
+        )}
+      </div>
     </div>
   );
 }

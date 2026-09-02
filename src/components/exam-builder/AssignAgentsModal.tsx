@@ -3,9 +3,16 @@
 import { useEffect, useState } from "react";
 import { fetchUsersByRole } from "@/lib/users";
 import { updateExam } from "@/lib/exams";
+import { sendAssignmentNotifications } from "@/lib/notifications";
 import type { Exam, AppUser } from "@/types";
 
-export function AssignAgentsModal({ exam, onDone }: { exam: Exam; onDone: () => void }) {
+export function AssignAgentsModal({
+  exam,
+  onDone,
+}: {
+  exam: Exam;
+  onDone: (updatedAssignedIds?: string[]) => void;
+}) {
   const [agents, setAgents] = useState<AppUser[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set(exam.assignedAgentIds));
   const [saving, setSaving] = useState(false);
@@ -24,12 +31,20 @@ export function AssignAgentsModal({ exam, onDone }: { exam: Exam; onDone: () => 
 
   async function handleSave() {
     setSaving(true);
+    const assigned = Array.from(selected);
+    const newlyAssigned = assigned.filter((id) => !exam.assignedAgentIds.includes(id));
+
     await updateExam(exam.id, {
-      assignedAgentIds: Array.from(selected),
+      assignedAgentIds: assigned,
       status: exam.status === "draft" ? "published" : exam.status,
     });
+
+    if (newlyAssigned.length > 0) {
+      sendAssignmentNotifications(newlyAssigned, exam.name, exam.id).catch(console.error);
+    }
+
     setSaving(false);
-    onDone();
+    onDone(assigned);
   }
 
   return (

@@ -4,7 +4,7 @@ import {
   increment, QueryDocumentSnapshot, DocumentData,
 } from "firebase/firestore";
 import { db } from "./firebase";
-import type { Question, Difficulty, QuestionType } from "@/types";
+import type { Question, Difficulty, QuestionType, QuestionVersion } from "@/types";
 
 const COL = "questions";
 
@@ -80,11 +80,21 @@ export async function fetchQuestionsPage(
 }
 
 export async function getQuestion(id: string): Promise<Question | null> {
+  if (questionBankCache) {
+    const cached = questionBankCache.find((q) => q.id === id);
+    if (cached) return cached;
+  }
   const snap = await getDoc(doc(db, COL, id));
   return snap.exists() ? ({ id: snap.id, ...snap.data() } as Question) : null;
 }
 
 export async function getQuestionsByIds(ids: string[]): Promise<Question[]> {
+  if (ids.length === 0) return [];
+  if (questionBankCache) {
+    const map = new Map(questionBankCache.map((q) => [q.id, q]));
+    const allFound = ids.map((id) => map.get(id)).filter(Boolean) as Question[];
+    if (allFound.length === ids.length) return allFound;
+  }
   // Firestore has no "IN with >30" without chunking; chunk into groups of 30.
   const chunks: string[][] = [];
   for (let i = 0; i < ids.length; i += 30) chunks.push(ids.slice(i, i + 30));
@@ -96,34 +106,143 @@ export async function getQuestionsByIds(ids: string[]): Promise<Question[]> {
   return results;
 }
 
+export function normalizeQuestionText(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+export async function checkDuplicateQuestionText(
+  questionText: string,
+  excludeId?: string
+): Promise<boolean> {
+  const normalizedTarget = normalizeQuestionText(questionText);
+  if (!normalizedTarget) return false;
+
+  const all = await fetchAllQuestions();
+  return all.some(
+    (q) =>
+      q.id !== excludeId &&
+      normalizeQuestionText(q.questionText) === normalizedTarget
+  );
+}
+
+function stripUndefined<T extends Record<string, unknown>>(obj: T): T {
+  const clean: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) clean[k] = v;
+  }
+  return clean as T;
+}
+
 export async function createQuestion(
   data: Omit<Question, "id" | "createdAt" | "updatedAt" | "version" | "stats">,
   createdBy: string
-) {
-  const ref = await addDoc(collection(db, COL), {
+): Promise<Question> {
+  const isDuplicate = await checkDuplicateQuestionText(data.questionText);
+  if (isDuplicate) {
+    throw new Error("A question with this exact text already exists in the Question Bank.");
+  }
+  const now = Date.now();
+  const payload = stripUndefined({
     ...data,
     createdBy,
     version: 1,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
+    createdAt: now,
+    updatedAt: now,
     stats: { timesAsked: 0, avgMarks: 0, correctPct: 0, incorrectPct: 0 },
   });
-  invalidateQuestionBankCache();
-  return ref.id;
+  const ref = await addDoc(collection(db, COL), payload);
+  const newQuestion: Question = {
+    id: ref.id,
+    ...(payload as any),
+  };
+  if (questionBankCache) {
+    questionBankCache = [newQuestion, ...questionBankCache];
+  }
+  return newQuestion;
 }
 
-export async function updateQuestion(id: string, data: Partial<Question>) {
-  await updateDoc(doc(db, COL, id), {
+export async function updateQuestion(id: string, data: Partial<Question>, updatedBy?: string): Promise<void> {
+  if (data.questionText) {
+    const isDuplicate = await checkDuplicateQuestionText(data.questionText, id);
+    if (isDuplicate) {
+      throw new Error("Another question with this exact text already exists in the Question Bank.");
+    }
+  }
+
+  // Snapshot previous question version before applying updates
+  try {
+    const existing = await getQuestion(id);
+    if (existing) {
+      const versionDoc: Omit<QuestionVersion, "id"> = {
+        questionId: id,
+        version: existing.version || 1,
+        module: existing.module,
+        feature: existing.feature,
+        difficulty: existing.difficulty,
+        tags: existing.tags ?? [],
+        type: existing.type,
+        questionText: existing.questionText,
+        expectedAnswer: existing.expectedAnswer,
+        notes: existing.notes,
+        options: existing.options,
+        correctOptionIndex: existing.correctOptionIndex,
+        imageUrl: existing.imageUrl,
+        caseStudyContext: existing.caseStudyContext,
+        orderItems: existing.orderItems,
+        updatedAt: existing.updatedAt || existing.createdAt || Date.now(),
+        updatedBy: updatedBy || existing.createdBy,
+      };
+      await addDoc(collection(db, COL, id, "versions"), stripUndefined(versionDoc as Record<string, unknown>));
+    }
+  } catch (err) {
+    console.error("Failed to snapshot previous question version:", err);
+  }
+
+  const cleanData = stripUndefined({
     ...data,
     updatedAt: Date.now(),
     version: increment(1),
   });
-  invalidateQuestionBankCache();
+  await updateDoc(doc(db, COL, id), cleanData);
+  if (questionBankCache) {
+    questionBankCache = questionBankCache.map((q) =>
+      q.id === id
+        ? {
+            ...q,
+            ...stripUndefined(data as Record<string, unknown>),
+            updatedAt: Date.now(),
+            version: (q.version || 1) + 1,
+          }
+        : q
+    );
+  }
 }
 
-export async function deleteQuestion(id: string) {
+export async function getQuestionVersions(questionId: string): Promise<QuestionVersion[]> {
+  try {
+    const q = query(
+      collection(db, COL, questionId, "versions"),
+      orderBy("version", "desc")
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => ({
+      id: d.id,
+      ...(d.data() as Omit<QuestionVersion, "id">),
+    }));
+  } catch (err) {
+    console.error("Failed to fetch question versions:", err);
+    return [];
+  }
+}
+
+export async function deleteQuestion(id: string): Promise<void> {
   await deleteDoc(doc(db, COL, id));
-  invalidateQuestionBankCache();
+  if (questionBankCache) {
+    questionBankCache = questionBankCache.filter((q) => q.id !== id);
+  }
 }
 
 // Bulk insert used by the Excel importer.
@@ -141,13 +260,6 @@ export async function deleteQuestion(id: string) {
 // Failed batches are retried up to 3 times with exponential backoff before
 // being counted as failed and moving on — a transient network blip no longer
 // kills the rest of the import.
-function stripUndefined<T extends Record<string, unknown>>(obj: T): T {
-  const clean: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (v !== undefined) clean[k] = v;
-  }
-  return clean as T;
-}
 
 async function commitWithRetry(batch: ReturnType<typeof writeBatch>, maxRetries = 3): Promise<{ ok: boolean; error?: string }> {
   let attempt = 0;
@@ -173,27 +285,6 @@ export interface BulkImportSummary {
   failedBatches: { startIndex: number; count: number; error: string }[];
 }
 
-// Firestore has no server-side "insert if not exists" for batched writes, so
-// cross-run duplicate protection works by pre-loading every sourceId already
-// stored for the modules in this import, then skipping any row that matches.
-// Scoped to just the affected modules (not the whole collection) to keep this
-// cheap even once the bank has 10k+ questions.
-async function loadExistingSourceIds(modules: string[]): Promise<Set<string>> {
-  const existing = new Set<string>();
-  const uniqueModules = Array.from(new Set(modules));
-  // Firestore "in" queries cap at 30 values — chunk defensively even though
-  // real question banks rarely exceed a handful of modules.
-  for (let i = 0; i < uniqueModules.length; i += 30) {
-    const group = uniqueModules.slice(i, i + 30);
-    const snap = await getDocs(query(collection(db, COL), where("module", "in", group)));
-    snap.docs.forEach((d) => {
-      const sourceId = (d.data() as Question).sourceId;
-      if (sourceId) existing.add(sourceId);
-    });
-  }
-  return existing;
-}
-
 export async function bulkCreateQuestions(
   rows: Omit<Question, "id" | "createdAt" | "updatedAt" | "version" | "stats">[],
   createdBy: string,
@@ -202,16 +293,17 @@ export async function bulkCreateQuestions(
 ): Promise<BulkImportSummary> {
   const summary: BulkImportSummary = { imported: 0, failed: 0, duplicatesSkipped: 0, failedBatches: [] };
 
-  const existingSourceIds = await loadExistingSourceIds(rows.map((r) => r.module));
+  const allExisting = await fetchAllQuestions();
+  const existingTexts = new Set(allExisting.map((q) => normalizeQuestionText(q.questionText)));
 
-  // Rows without a sourceId (blank Question No.) can't be deduped against
-  // Firestore, so they always upload — only sourceId-bearing rows get skipped.
   const toUpload = rows.filter((r) => {
-    if (r.sourceId && existingSourceIds.has(r.sourceId)) {
+    const norm = normalizeQuestionText(r.questionText);
+    if (!norm) return false;
+    if (existingTexts.has(norm)) {
       summary.duplicatesSkipped++;
       return false;
     }
-    if (r.sourceId) existingSourceIds.add(r.sourceId); // catch dupes within this same run too
+    existingTexts.add(norm); // catch dupes within this same run too
     return true;
   });
 

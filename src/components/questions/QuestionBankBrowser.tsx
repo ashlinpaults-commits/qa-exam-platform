@@ -3,15 +3,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchAllQuestions, invalidateQuestionBankCache, deleteQuestion } from "@/lib/questions";
 import type { Question, Difficulty, QuestionType } from "@/types";
-import { Badge, Modal, EmptyState } from "@/components/ui/Primitives";
+import { Badge, Modal, EmptyState, MarkdownRenderer } from "@/components/ui/Primitives";
 import { QuestionForm } from "./QuestionForm";
 import { ExcelImportModal } from "./ExcelImportModal";
+import { QuestionVersionHistoryModal } from "./QuestionVersionHistoryModal";
+import { exportQuestionsToExcel } from "@/lib/excelExport";
 import {
   Search,
   Plus,
   Upload,
+  Download,
   Trash2,
   Pencil,
+  History,
+  Eye,
   X,
   SlidersHorizontal,
   RotateCcw,
@@ -30,9 +35,10 @@ const TYPE_LABELS: Record<QuestionType, string> = {
   image_based: "Image Based",
   case_study: "Case Study",
   drag_drop_order: "Drag & Drop",
+  screen_recording: "Screen Recording",
 };
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 25;
 
 function normalize(value: unknown) {
   return String(value ?? "")
@@ -73,10 +79,12 @@ export function QuestionBankBrowser({
   const [reviewer, setReviewer] = useState("");
   const [questionNo, setQuestionNo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [currentPage, setCurrentPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Question | null | "new">(null);
+  const [previewQuestion, setPreviewQuestion] = useState<Question | null>(null);
+  const [historyQuestion, setHistoryQuestion] = useState<Question | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -170,11 +178,15 @@ export function QuestionBankBrowser({
   }, [allQuestions, search, module, feature, difficulty, type, reviewStatus, scenario, reviewer, questionNo]);
 
   useEffect(() => {
-    setVisibleCount(PAGE_SIZE);
+    setCurrentPage(1);
   }, [search, module, feature, difficulty, type, reviewStatus, scenario, reviewer, questionNo]);
 
-  const visibleQuestions = filteredQuestions.slice(0, visibleCount);
-  const hasMore = visibleCount < filteredQuestions.length;
+  const totalPages = Math.max(1, Math.ceil(filteredQuestions.length / PAGE_SIZE));
+  const visibleQuestions = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    return filteredQuestions.slice(start, start + PAGE_SIZE);
+  }, [filteredQuestions, currentPage]);
+
   const activeFilterCount = [module, feature, difficulty, type, reviewStatus, scenario, reviewer, questionNo].filter(Boolean).length;
 
   function clearFilters() {
@@ -187,6 +199,7 @@ export function QuestionBankBrowser({
     setScenario("");
     setReviewer("");
     setQuestionNo("");
+    setCurrentPage(1);
   }
 
   async function handleDelete(id: string) {
@@ -197,7 +210,9 @@ export function QuestionBankBrowser({
 
   function handleSaved() {
     setEditing(null);
-    loadQuestions(true);
+    fetchAllQuestions().then((questions) => {
+      setAllQuestions([...questions]);
+    });
   }
 
   function handleImported() {
@@ -236,6 +251,13 @@ export function QuestionBankBrowser({
           )}
           {!selectable && (
             <>
+              <button
+                className="btn-secondary"
+                onClick={() => exportQuestionsToExcel(filteredQuestions, "question_bank_export.xlsx")}
+                title="Export current filtered questions to Excel"
+              >
+                <Download className="mr-1.5 h-4 w-4" /> Export Excel
+              </button>
               <button className="btn-secondary" onClick={() => setImportOpen(true)}>
                 <Upload className="mr-1.5 h-4 w-4" /> Import Excel
               </button>
@@ -293,7 +315,7 @@ export function QuestionBankBrowser({
         {!loading && !error && (
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
             <span>
-              Showing <strong className="text-slate-700 dark:text-slate-200">{visibleQuestions.length}</strong> of <strong className="text-slate-700 dark:text-slate-200">{filteredQuestions.length}</strong> matching questions
+              Showing <strong className="text-slate-700 dark:text-slate-200">{filteredQuestions.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredQuestions.length)}</strong> of <strong className="text-slate-700 dark:text-slate-200">{filteredQuestions.length}</strong> matching questions
               {search ? ` for “${search}”` : ""}
             </span>
             <span>{allQuestions.length.toLocaleString()} questions in bank</span>
@@ -340,6 +362,26 @@ export function QuestionBankBrowser({
               </div>
               {!selectable && (
                 <div className="flex shrink-0 gap-1">
+                  <button
+                    className="btn-secondary px-2 py-1"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPreviewQuestion(q);
+                    }}
+                    title="Preview question formatted"
+                  >
+                    <Eye className="h-4 w-4" />
+                  </button>
+                  <button
+                    className="btn-secondary px-2 py-1"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setHistoryQuestion(q);
+                    }}
+                    title="View revision history & diff"
+                  >
+                    <History className="h-4 w-4" />
+                  </button>
                   <button className="btn-secondary px-2 py-1" onClick={(e) => { e.stopPropagation(); setEditing(q); }} title="Edit question">
                     <Pencil className="h-4 w-4" />
                   </button>
@@ -352,10 +394,26 @@ export function QuestionBankBrowser({
             </div>
           ))}
 
-          {hasMore && (
-            <button className="btn-secondary w-full" onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}>
-              Load more ({filteredQuestions.length - visibleCount} remaining)
-            </button>
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-800">
+              <button
+                className="btn-secondary text-xs"
+                disabled={currentPage <= 1}
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              >
+                Previous
+              </button>
+              <span className="text-xs text-slate-500">
+                Page {currentPage} of {totalPages}
+              </span>
+              <button
+                className="btn-secondary text-xs"
+                disabled={currentPage >= totalPages}
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              >
+                Next
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -373,7 +431,99 @@ export function QuestionBankBrowser({
         <QuestionForm existing={editing === "new" ? null : editing} onSaved={handleSaved} />
       </Modal>
 
+      <Modal
+        open={previewQuestion !== null}
+        onClose={() => setPreviewQuestion(null)}
+        title="Question Preview"
+        wide
+      >
+        {previewQuestion && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-100 pb-3 dark:border-slate-800">
+              <Badge color="brand">{previewQuestion.module}</Badge>
+              <Badge>{previewQuestion.feature}</Badge>
+              <Badge color={DIFF_COLOR[previewQuestion.difficulty]}>{previewQuestion.difficulty}</Badge>
+              <Badge>{TYPE_LABELS[previewQuestion.type] ?? previewQuestion.type}</Badge>
+              {previewQuestion.tags.map((t) => (
+                <Badge key={t}>{t}</Badge>
+              ))}
+            </div>
+
+            <div>
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Question Text
+              </p>
+              <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 text-sm dark:border-slate-700 dark:bg-slate-800/40">
+                <MarkdownRenderer content={previewQuestion.questionText} />
+              </div>
+            </div>
+
+            {previewQuestion.caseStudyContext && (
+              <div>
+                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Case Study Scenario
+                </p>
+                <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 text-sm dark:border-slate-700 dark:bg-slate-800/40">
+                  <MarkdownRenderer content={previewQuestion.caseStudyContext} />
+                </div>
+              </div>
+            )}
+
+            {previewQuestion.imageUrl && (
+              <div>
+                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Question Image
+                </p>
+                <img
+                  src={previewQuestion.imageUrl}
+                  alt="Question reference"
+                  className="max-h-80 rounded-xl border border-slate-200"
+                />
+              </div>
+            )}
+
+            {previewQuestion.options && previewQuestion.options.length > 0 && (
+              <div>
+                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Options
+                </p>
+                <div className="space-y-1.5">
+                  {previewQuestion.options.map((opt, i) => (
+                    <div
+                      key={i}
+                      className={`rounded-lg border px-3 py-2 text-xs ${
+                        previewQuestion.correctOptionIndex === i
+                          ? "border-green-300 bg-green-50 font-medium text-green-900 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300"
+                          : "border-slate-200 dark:border-slate-700"
+                      }`}
+                    >
+                      {opt} {previewQuestion.correctOptionIndex === i && "✓ (Correct)"}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Expected Answer / Rubric
+              </p>
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 text-sm text-emerald-950 dark:border-emerald-800/60 dark:bg-emerald-950/20 dark:text-emerald-200">
+                <MarkdownRenderer content={previewQuestion.expectedAnswer} />
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
+
       <ExcelImportModal open={importOpen} onClose={() => setImportOpen(false)} onImported={handleImported} />
+
+      {historyQuestion && (
+        <QuestionVersionHistoryModal
+          question={historyQuestion}
+          onClose={() => setHistoryQuestion(null)}
+        />
+      )}
     </div>
   );
 }

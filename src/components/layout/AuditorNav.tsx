@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, BookOpen, FileText, BarChart3, Users } from "lucide-react";
+import { LayoutDashboard, BookOpen, FileText, BarChart3, Users, Settings } from "lucide-react";
 import { clsx } from "clsx";
 
 const LINKS = [
@@ -11,6 +11,7 @@ const LINKS = [
   { href: "/auditor/exams", label: "Exams", icon: FileText },
   { href: "/auditor/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/auditor/admin", label: "Users", icon: Users },
+  { href: "/auditor/settings", label: "Settings", icon: Settings },
 ];
 
 export function AuditorNav() {
