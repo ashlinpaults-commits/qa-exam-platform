@@ -905,15 +905,36 @@ function AttemptDetailsModal({
 
   const answerRows =
     attempt.answers.map(
-      (answer) => ({
-        answer,
-        question:
-          questionMap.get(
-            answer.questionId
-          ),
-        state:
-          getAnswerState(answer),
-      })
+      (answer) => {
+        const live = questionMap.get(
+          answer.questionId
+        );
+
+        // The snapshot frozen on this attempt is deliberately redacted
+        // (no expectedAnswer/correctOptionIndex) so agents can't read
+        // answer keys through their own attempt document. This report is
+        // auditor-only, and the auditor's `questions` fetch above DOES
+        // carry the real answer key — merge it back in for display so
+        // the reference grading answer isn't blank, while still keeping
+        // the frozen historical question text/options/type.
+        const question = answer.questionSnapshot
+          ? {
+              ...answer.questionSnapshot,
+              expectedAnswer:
+                live?.expectedAnswer ??
+                answer.questionSnapshot.expectedAnswer,
+              correctOptionIndex:
+                live?.correctOptionIndex ??
+                answer.questionSnapshot.correctOptionIndex,
+            }
+          : live;
+
+        return {
+          answer,
+          question,
+          state: getAnswerState(answer),
+        };
+      }
     );
 
   const correctCount =

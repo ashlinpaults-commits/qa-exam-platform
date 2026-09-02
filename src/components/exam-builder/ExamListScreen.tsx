@@ -32,8 +32,14 @@ export function ExamListScreen() {
 
   async function load() {
     setLoading(true);
-    setExams(await fetchExams());
-    setLoading(false);
+    try {
+      setExams(await fetchExams());
+    } catch (error) {
+      console.error("Failed to load exams", error);
+      alert(error instanceof Error ? error.message : "Couldn't load exams. Please retry.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -77,8 +83,9 @@ export function ExamListScreen() {
     try {
       const copy = await duplicateExam(id, profile.uid);
       setExams((prev) => [copy, ...prev]);
-    } catch (err) {
-      console.error("Duplicate exam failed:", err);
+    } catch (error) {
+      console.error("Duplicate exam failed:", error);
+      alert(error instanceof Error ? error.message : "Couldn't duplicate exam.");
     }
   }
 
@@ -89,8 +96,9 @@ export function ExamListScreen() {
       setExams((prev) =>
         prev.map((e) => (e.id === exam.id ? { ...e, status: nextStatus } : e))
       );
-    } catch (err) {
-      console.error("Archive exam failed:", err);
+    } catch (error) {
+      console.error("Archive exam failed:", error);
+      alert(error instanceof Error ? error.message : "Couldn't archive/unarchive exam.");
     }
   }
 
@@ -99,23 +107,16 @@ export function ExamListScreen() {
     try {
       await deleteExam(id);
       setExams((prev) => prev.filter((e) => e.id !== id));
-    } catch (err) {
-      console.error("Delete exam failed:", err);
+    } catch (error) {
+      console.error("Delete exam failed:", error);
+      alert(error instanceof Error ? error.message : "Couldn't delete exam.");
     }
   }
 
-  function handleAssignDone(updatedAssignedIds?: string[]) {
-    if (assigning && updatedAssignedIds) {
+  function handleAssignDone(patch: { assignedAgentIds: string[]; status: ExamStatus }) {
+    if (assigning) {
       setExams((prev) =>
-        prev.map((e) =>
-          e.id === assigning.id
-            ? {
-                ...e,
-                assignedAgentIds: updatedAssignedIds,
-                status: e.status === "draft" ? "published" : e.status,
-              }
-            : e
-        )
+        prev.map((e) => (e.id === assigning.id ? { ...e, ...patch } : e))
       );
     }
     setAssigning(null);

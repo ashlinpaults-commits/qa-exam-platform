@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getExam } from "@/lib/exams";
-import { getQuestion } from "@/lib/questions";
 import { startAttempt, saveAnswer, submitAttempt, getAttempt } from "@/lib/attempts";
 import { useAuth } from "@/context/AuthContext";
 import type { Exam, Question, ExamAttempt } from "@/types";
@@ -33,25 +32,45 @@ export function TakeExam({ examId }: { examId: string }) {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [error, setError] = useState("");
 
   useEffect(() => {
     if (!profile) return;
     (async () => {
-      const e = await getExam(examId);
-      if (!e) return;
-      setExam(e);
-      const qs = await Promise.all(e.questions.sort((a, b) => a.order - b.order).map((r) => getQuestion(r.questionId)));
-      setQuestions(qs.filter(Boolean) as Question[]);
+      try {
+        const e = await getExam(examId);
+        if (!e) throw new Error("This exam is no longer available.");
+        setExam(e);
 
-      const attemptId = await startAttempt(e, profile.uid);
-      const a = await getAttempt(attemptId);
-      setAttempt(a);
-      if (a) {
+        const attemptId = await startAttempt(e, profile.uid);
+        const a = await getAttempt(attemptId);
+        setAttempt(a);
+
+        if (a) {
+        // Each answer carries a snapshot of the question exactly as it
+        // was when this attempt started — use that instead of a live
+        // Question Bank fetch, so an auditor editing a question mid-exam
+        // can't change what the agent is currently looking at. Older
+        // attempts created before snapshots existed fall back to a live
+        // fetch so they keep working.
+        const qs = a.answers
+          .map((ans) => ans.questionSnapshot ?? e.questionSnapshots?.[ans.questionId])
+          .filter(Boolean) as Question[];
+        if (qs.length !== a.answers.length) {
+          throw new Error("This exam is missing its safe question content. Ask an auditor to republish it.");
+        }
+        setQuestions(qs);
+
         const initial: Record<string, string> = {};
         a.answers.forEach((ans) => (initial[ans.questionId] = ans.agentAnswer));
-        setAnswers(initial);
+          setAnswers(initial);
+        }
+      } catch (err) {
+        console.error("Failed to load attempt", err);
+        setError(err instanceof Error ? err.message : "Couldn't load this exam. Please retry.");
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     })();
   }, [examId, profile]);
 
@@ -66,6 +85,10 @@ export function TakeExam({ examId }: { examId: string }) {
       saveAnswer(attempt.id, current.id, val, attempt.answers).then((updated) => {
         setAttempt((prev) => (prev ? { ...prev, answers: updated } : prev));
         setSaveStatus("saved");
+      }).catch((err) => {
+        console.error("Failed to save answer", err);
+        setSaveStatus("idle");
+        setError(err instanceof Error ? err.message : "Couldn't save your answer. Check your connection and retry.");
       });
     },
     900,
@@ -75,12 +98,26 @@ export function TakeExam({ examId }: { examId: string }) {
   async function handleSubmit() {
     if (!attempt) return;
     setSubmitting(true);
-    await submitAttempt(attempt.id, attempt.startedAt);
-    setSubmitting(false);
-    router.push("/agent/dashboard");
+    try {
+      // The debounce may still be pending for the last field the agent typed.
+      // Flush it before changing the attempt status to submitted.
+      if (current && answers[current.id] !== undefined) {
+        await saveAnswer(attempt.id, current.id, answers[current.id], attempt.answers);
+      }
+      await submitAttempt(attempt.id, attempt.startedAt);
+      router.push("/agent/dashboard");
+    } catch (err) {
+      console.error("Failed to submit attempt", err);
+      setError(err instanceof Error ? err.message : "Couldn't submit your exam. Please retry.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   if (loading || !exam || !current) {
+    if (error) {
+      return <div className="mx-auto max-w-2xl rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">{error}</div>;
+    }
     return (
       <div className="flex min-h-[50vh] items-center justify-center">
         <Loader2 className="h-6 w-6 animate-spin text-brand-600" />
@@ -92,6 +129,7 @@ export function TakeExam({ examId }: { examId: string }) {
 
   return (
     <div className="mx-auto max-w-2xl">
+      {error && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>}
       <div className="mb-4">
         <div className="mb-1 flex items-center justify-between text-sm text-slate-500">
           <span>Question {index + 1} of {questions.length}</span>

@@ -43,11 +43,10 @@ export function ExamBuilder({ examId }: { examId?: string }) {
       setDescription(exam.description);
       setMode(exam.mode);
       setStatus(exam.status);
-      const orderedIds = exam.questions.sort((a, b) => a.order - b.order).map((r) => r.questionId);
-      const qs = await getQuestionsByIds(orderedIds);
-      const qMap = new Map(qs.map((q) => [q.id, q]));
-      const orderedQuestions = orderedIds.map((id) => qMap.get(id)).filter(Boolean) as Question[];
-      setSelected(orderedQuestions);
+      const refs = [...exam.questions].sort((a, b) => a.order - b.order);
+      const qs = await getQuestionsByIds(refs.map((r) => r.questionId));
+      const byId = new Map(qs.map((q) => [q.id, q]));
+      setSelected(refs.map((r) => byId.get(r.questionId)).filter(Boolean) as Question[]);
       setLoaded(true);
     })();
   }, [examId]);
@@ -70,12 +69,23 @@ export function ExamBuilder({ examId }: { examId?: string }) {
     if (!profile || !name.trim() || selected.length === 0) return;
     setError(null);
     setSaving(true);
+    // Keep answer keys out of the exam document: agents can read published
+    // exams, while only auditors can read `questions`.
+    const questionSnapshots = Object.fromEntries(selected.map((q) => {
+      const { correctOptionIndex: _correctOptionIndex, ...safeQuestion } = q;
+      return [q.id, {
+        ...safeQuestion,
+        expectedAnswer: "",
+        stats: { timesAsked: 0, avgMarks: 0, correctPct: 0, incorrectPct: 0 },
+      }];
+    }));
     const payload = {
       name: name.trim(),
       description: description.trim(),
       mode,
       status: publish ? ("published" as const) : status === "published" ? status : ("draft" as const),
       questions: selected.map((q, i) => ({ questionId: q.id, order: i })),
+      questionSnapshots,
       assignedAgentIds: [] as string[],
     };
     try {
@@ -89,7 +99,7 @@ export function ExamBuilder({ examId }: { examId?: string }) {
       router.push("/auditor/exams");
     } catch (err) {
       console.error("Failed to save exam:", err);
-      setError(err instanceof Error ? err.message : "Failed to save exam.");
+      setError(err instanceof Error ? err.message : "Couldn't save exam. Please retry.");
     } finally {
       setSaving(false);
     }

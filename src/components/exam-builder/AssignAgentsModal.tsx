@@ -4,21 +4,25 @@ import { useEffect, useState } from "react";
 import { fetchUsersByRole } from "@/lib/users";
 import { updateExam } from "@/lib/exams";
 import { sendAssignmentNotifications } from "@/lib/notifications";
-import type { Exam, AppUser } from "@/types";
+import type { Exam, AppUser, ExamStatus } from "@/types";
 
 export function AssignAgentsModal({
   exam,
   onDone,
 }: {
   exam: Exam;
-  onDone: (updatedAssignedIds?: string[]) => void;
+  onDone: (patch: { assignedAgentIds: string[]; status: ExamStatus }) => void;
 }) {
   const [agents, setAgents] = useState<AppUser[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set(exam.assignedAgentIds));
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    fetchUsersByRole("agent").then(setAgents);
+    fetchUsersByRole("agent").then(setAgents).catch((err) => {
+      console.error("Failed to load agents", err);
+      setError(err instanceof Error ? err.message : "Couldn't load agents.");
+    });
   }, []);
 
   function toggle(uid: string) {
@@ -31,24 +35,32 @@ export function AssignAgentsModal({
 
   async function handleSave() {
     setSaving(true);
+    setError("");
     const assigned = Array.from(selected);
     const newlyAssigned = assigned.filter((id) => !exam.assignedAgentIds.includes(id));
-
-    await updateExam(exam.id, {
+    const patch = {
       assignedAgentIds: assigned,
-      status: exam.status === "draft" ? "published" : exam.status,
-    });
+      status: exam.status === "draft" ? ("published" as const) : exam.status,
+    };
+    try {
+      await updateExam(exam.id, patch);
 
-    if (newlyAssigned.length > 0) {
-      sendAssignmentNotifications(newlyAssigned, exam.name, exam.id).catch(console.error);
+      if (newlyAssigned.length > 0) {
+        sendAssignmentNotifications(newlyAssigned, exam.name, exam.id).catch(console.error);
+      }
+
+      onDone(patch);
+    } catch (err) {
+      console.error("Failed to assign agents", err);
+      setError(err instanceof Error ? err.message : "Couldn't assign agents. Please retry.");
+    } finally {
+      setSaving(false);
     }
-
-    setSaving(false);
-    onDone(assigned);
   }
 
   return (
     <div className="space-y-3">
+      {error && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>}
       {agents.length === 0 ? (
         <p className="text-sm text-slate-400">No agent accounts found yet.</p>
       ) : (

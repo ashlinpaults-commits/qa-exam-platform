@@ -79,6 +79,21 @@ export function AdminUsersScreen() {
         return;
     }
     const newRole: UserRole = u.role === "auditor" ? "agent" : "auditor";
+
+    // Prevent demoting the last auditor which would lock everyone out
+    if (u.role === "auditor" && newRole === "agent") {
+      const remainingAuditors = users.filter(
+        (x) => x.role === "auditor" && x.uid !== u.uid
+      ).length;
+      if (remainingAuditors === 0) {
+        setMessage({
+          type: "error",
+          text: "Can't remove the last auditor — this would lock everyone out of review and admin screens.",
+        });
+        return;
+      }
+    }
+
     try {
       await setUserRole(u.uid, newRole);
       setUsers((prev) =>

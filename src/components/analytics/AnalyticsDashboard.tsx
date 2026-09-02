@@ -17,7 +17,7 @@ import {
 
 import { fetchExams } from "@/lib/exams";
 import { fetchAttemptsForExam } from "@/lib/attempts";
-import { fetchQuestionsPage } from "@/lib/questions";
+import { fetchAllQuestions } from "@/lib/questions";
 import { fetchAllUsers } from "@/lib/users";
 
 import {
@@ -39,6 +39,24 @@ import type {
 import { EmptyState } from "@/components/ui/Primitives";
 import { MetricInfo } from "@/components/ui/MetricInfo";
 
+/*
+ * Session-scoped cache for this dashboard's combined dataset. Lives outside
+ * the component so it survives unmount/remount (navigating away and back)
+ * but not a full page reload — that's fine, a reload is a natural,
+ * infrequent point to pay for a fresh read. This does not touch
+ * fetchExams/fetchAttemptsForExam/fetchAllUsers themselves, so no other
+ * screen's freshness guarantees change.
+ */
+let analyticsDataCache: {
+  exams: Exam[];
+  attempts: ExamAttempt[];
+  questions: Question[];
+  users: AppUser[];
+  fetchedAt: number;
+} | null = null;
+
+const ANALYTICS_CACHE_TTL_MS = 2 * 60 * 1000;
+
 export function AnalyticsDashboard() {
   const [exams, setExams] = useState<Exam[]>([]);
   const [attempts, setAttempts] = useState<ExamAttempt[]>([]);
@@ -55,8 +73,30 @@ export function AnalyticsDashboard() {
       try {
         setLoading(true);
 
+        /*
+         * This dashboard needs full attempt history to compute agent
+         * competency/coaching trends, so its Firestore reads scale with
+         * total attempts (unavoidable without a bigger precomputed-
+         * aggregate rework — see Phase 5 notes). What we CAN cheaply
+         * avoid is re-running that full scan every time someone opens
+         * this page in the same session. A short in-memory cache
+         * collapses repeated visits into one read.
+         */
+        const cached = analyticsDataCache;
+        if (
+          cached &&
+          Date.now() - cached.fetchedAt <
+            ANALYTICS_CACHE_TTL_MS
+        ) {
+          setExams(cached.exams);
+          setAttempts(cached.attempts);
+          setQuestions(cached.questions);
+          setUsers(cached.users);
+          setLoading(false);
+          return;
+        }
+
         const examList = await fetchExams();
-        setExams(examList);
 
         const allAttempts = (
           await Promise.all(
@@ -66,12 +106,25 @@ export function AnalyticsDashboard() {
           )
         ).flat();
 
-        setAttempts(allAttempts);
-
-        const { docs } = await fetchQuestionsPage({}, 3000);
-        setQuestions(docs);
+        // Shares the same cache as the Question Bank browser, and has no
+        // hard cap — the old fetchQuestionsPage({}, 3000) call would
+        // silently truncate once the bank passed 3,000 questions.
+        const questionList =
+          await fetchAllQuestions();
 
         const allUsers = await fetchAllUsers();
+
+        analyticsDataCache = {
+          exams: examList,
+          attempts: allAttempts,
+          questions: questionList,
+          users: allUsers,
+          fetchedAt: Date.now(),
+        };
+
+        setExams(examList);
+        setAttempts(allAttempts);
+        setQuestions(questionList);
         setUsers(allUsers);
       } catch (error) {
         console.error("Unable to load analytics:", error);
@@ -272,64 +325,43 @@ const coachingCounts = useMemo(
   /* =========================================================
      FREQUENTLY MISSED QUESTIONS
 
-     Historical reviewed answers.
-     A miss = below 70%.
+     Every finalized review already increments the question's own
+     stats.timesAsked/correctPct/incorrectPct atomically (see
+     finalizeReview in lib/attempts.ts). Reusing that precomputed,
+     incrementally-maintained aggregate here means this report no longer
+     needs to rescan every historical attempt — it's derived entirely
+     from the `questions` list already loaded above, so this metric's
+     cost doesn't grow with attempt/response history at all.
+
+     A miss = below 70%, matching the same threshold finalizeReview uses
+     to maintain correctPct/incorrectPct, so this is not a behavior
+     change from the old attempt-scanning version.
      ========================================================= */
 
-  const missedMap = new Map<
-    string,
-    {
-      asked: number;
-      missed: number;
-    }
-  >();
+  const frequentlyMissed = questions
+    .map((question) => {
+      const asked =
+        question.stats?.timesAsked ?? 0;
 
-  activeAttempts
-    .filter((attempt) => attempt.status === "reviewed")
-    .forEach((attempt) => {
-      attempt.answers.forEach((answer) => {
-        if (answer.marks === undefined) return;
+      const incorrectPct =
+        question.stats?.incorrectPct ?? 0;
 
-        const current = missedMap.get(answer.questionId) ?? {
-          asked: 0,
-          missed: 0,
-        };
-
-        current.asked += 1;
-
-        const percentage =
-          answer.maxMarks > 0
-            ? (answer.marks / answer.maxMarks) * 100
-            : 0;
-
-        if (percentage < 70) {
-          current.missed += 1;
-        }
-
-        missedMap.set(answer.questionId, current);
-      });
-    });
-
-  const frequentlyMissed = Array.from(missedMap.entries())
-    .map(([questionId, value]) => {
-      const question = questionMap.get(questionId);
+      const missed = Math.round(
+        (incorrectPct / 100) * asked
+      );
 
       return {
-        questionId,
-        questionText:
-          question?.questionText ?? "Unknown question",
-        module: question?.module ?? "Unknown",
-        asked: value.asked,
-        missed: value.missed,
-        missPct:
-          value.asked > 0
-            ? Math.round(
-                (value.missed / value.asked) * 100
-              )
-            : 0,
+        questionId: question.id,
+        questionText: question.questionText,
+        module: question.module,
+        asked,
+        missed,
+        missPct: Math.round(incorrectPct),
       };
     })
-    .filter((item) => item.missed > 0)
+    .filter(
+      (item) => item.asked > 0 && item.missed > 0
+    )
     .sort((a, b) => {
       if (b.missed !== a.missed) {
         return b.missed - a.missed;

@@ -216,9 +216,7 @@ export function ReviewScreen() {
         }/${finalized.maxTotalMarks ?? 0}.`,
       });
 
-      setAttempts((prev) =>
-        prev.map((a) => (a.id === finalized.id ? finalized : a))
-      );
+      handleSavedAttempt(finalized);
     } catch (error) {
       console.error(error);
 
@@ -945,8 +943,28 @@ export function ReviewScreen() {
 
                     <div className="space-y-4">
                       {attempt.answers.map((ans, index) => {
-                        const q =
-                          questionCache[ans.questionId];
+                        // The snapshot frozen on this attempt is
+                        // deliberately redacted (no expectedAnswer/
+                        // correctOptionIndex) so agents can't read
+                        // answer keys through their own attempt document.
+                        // Merge the live, auditor-only question cache's
+                        // real answer key back in for the grading
+                        // reference, while keeping the frozen historical
+                        // question text/options/type. Older attempts
+                        // without a snapshot fall back to the live cache
+                        // entirely.
+                        const live = questionCache[ans.questionId];
+                        const q = ans.questionSnapshot
+                          ? {
+                              ...ans.questionSnapshot,
+                              expectedAnswer:
+                                live?.expectedAnswer ??
+                                ans.questionSnapshot.expectedAnswer,
+                              correctOptionIndex:
+                                live?.correctOptionIndex ??
+                                ans.questionSnapshot.correctOptionIndex,
+                            }
+                          : live;
 
                         if (!q) return null;
 

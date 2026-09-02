@@ -2,18 +2,113 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
 
-    // This rule allows anyone with your Firestore database reference to view, edit,
-    // and delete all data in your Firestore database. It is useful for getting
-    // started, but it is configured to expire after 30 days because it
-    // leaves your app open to attackers. At that time, all client
-    // requests to your Firestore database will be denied.
-    //
-    // Make sure to write security rules for your app before that time, or else
-    // all client requests to your Firestore database will be denied until you Update
-    // your rules
+    function isAuditor() {
+      return signedIn()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "auditor";
+    }
+
+    function isOwnUser(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // User-created profiles can only bootstrap as agents.  A client cannot
+    // grant itself auditor access or change its identity fields.
+    match /users/{uid} {
+      allow get: if isOwnUser(uid) || isAuditor();
+      allow list: if isAuditor();
+      allow create: if isOwnUser(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.role == "agent";
+      allow update: if isAuditor()
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["role"]);
+      allow delete: if false;
+    }
+
+    // Question documents contain answer keys (expectedAnswer,
+    // correctOptionIndex, and orderItems). They must not be readable by
+    // agents through the client SDK. Agents never read this collection —
+    // when an auditor publishes an exam, ExamBuilder copies a redacted
+    // per-question snapshot (no answer key) onto exams/{id}.questionSnapshots,
+    // and that's what the agent-facing exam flow reads instead.
+    match /questions/{questionId} {
+      allow read, create, update: if isAuditor();
+      allow delete: if isAuditor();
+    }
+
+    match /exams/{examId} {
+      allow read: if isAuditor()
+        || (signedIn()
+          && resource.data.assignedAgentIds.hasAny([request.auth.uid])
+          && (resource.data.status == "published" || resource.data.status == "active"));
+      allow create: if isAuditor()
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isAuditor()
+        && request.resource.data.createdBy == resource.data.createdBy;
+      allow delete: if isAuditor();
+    }
+
+    match /attempts/{attemptId} {
+      allow read: if isAuditor()
+        || (signedIn() && resource.data.agentId == request.auth.uid);
+
+      // Attempts are created only for the authenticated agent.  Score fields
+      // cannot be supplied by an agent at creation time — checked at the
+      // top level AND inside each answers[] entry, since a client could
+      // otherwise seed marks/scoreHistory/knowledgeGapCategory on an
+      // individual answer where the top-level key check can't see it.
+      allow create: if signedIn()
+        && request.resource.data.agentId == request.auth.uid
+        && request.resource.data.status == "in_progress"
+        && !request.resource.data.keys().hasAny([
+          "marks", "totalMarks", "reviewedBy", "reviewedAt", "scoreHistory"
+        ])
+        && !request.resource.data.answers.exists(a,
+          ('marks' in a) || ('scoreHistory' in a) || ('knowledgeGapCategory' in a)
+        );
+
+      // Agent drafts are stored in a separate map. This avoids allowing an
+      // agent to replace the auditor-owned answers array, which contains marks
+      // and review metadata.
+      allow update: if signedIn()
+        && resource.data.agentId == request.auth.uid
+        && resource.data.status == "in_progress"
+        && request.resource.data.status == "in_progress"
+        && request.resource.data.agentAnswers is map
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "agentAnswers"
+        ]);
+
+      allow update: if signedIn()
+        && resource.data.agentId == request.auth.uid
+        && resource.data.status == "in_progress"
+        && request.resource.data.status == "submitted"
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "submittedAt", "timeTakenSeconds"
+        ]);
+
+      // Auditors may review and finalize, but identity and historical timing
+      // fields are immutable. There is deliberately no delete rule.
+      allow update: if isAuditor()
+        && request.resource.data.examId == resource.data.examId
+        && request.resource.data.agentId == resource.data.agentId
+        && request.resource.data.attemptNumber == resource.data.attemptNumber
+        && request.resource.data.startedAt == resource.data.startedAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "answers", "status", "reviewStartedAt", "reviewedBy",
+          "reviewedAt", "totalMarks", "maxTotalMarks", "analyticsFinalized"
+        ]);
+      allow delete: if false;
+    }
+
+    // Any future collection is deny-by-default until it has an explicit
+    // permission model.
     match /{document=**} {
-      allow read, write: if request.time < timestamp.date(2026, 8, 16);
+      allow read, write: if false;
     }
   }
 }

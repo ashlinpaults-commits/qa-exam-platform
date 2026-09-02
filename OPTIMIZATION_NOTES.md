@@ -11,13 +11,17 @@ This build keeps the existing exam, review, analytics, assignment, and question-
 - Agent answer autosave is debounced to 2 seconds and writes are serialized to avoid overlapping full-answer writes.
 - Navigation and submission flush the current answer so the existing autosave behavior is preserved.
 - Review question lookups use batched queries.
-- Final review finalization commits the attempt status and question analytics in one atomic batch.
+- Review scoring uses transactions so concurrent auditors do not overwrite each
+  other's answer or question-stat updates.
 - Saving one review question updates local review state instead of re-fetching every attempt after every save.
 - Question-bank search and filters are entirely client-side after one initial question-bank load. Typing in search no longer causes Firestore requests.
 - Question-bank filters include module, feature, difficulty, question type, and tag.
 - A manual Refresh button is available when the auditor needs the latest question bank from Firestore.
 - Expired date-based Firestore rules were replaced with authenticated-user access so the database does not suddenly lock itself because a hard-coded date passed.
 - Added the composite index required for latest-attempt lookup.
+- Published exams carry redacted question snapshots. Agents no longer attempt
+  to read the protected `questions` collection, which also prevents answer-key
+  leakage.
 
 ## Important billing note
 

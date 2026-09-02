@@ -1,6 +1,6 @@
 import {
   collection, doc, addDoc, updateDoc, deleteDoc, getDocs, getDoc, query,
-  where, orderBy, writeBatch,
+  where, orderBy,
 } from "firebase/firestore";
 import { db } from "./firebase";
 import type { Exam, ExamStatus, ExamQuestionRef } from "@/types";
@@ -56,7 +56,7 @@ export async function duplicateExam(examId: string, createdBy: string): Promise<
   if (!original) throw new Error("Exam not found");
   const { id: _drop, ...rest } = original;
   const now = Date.now();
-  const newPayload = {
+  const payload = {
     ...rest,
     name: `${original.name} (Copy)`,
     status: "draft" as const,
@@ -65,8 +65,8 @@ export async function duplicateExam(examId: string, createdBy: string): Promise<
     createdAt: now,
     updatedAt: now,
   };
-  const ref = await addDoc(collection(db, COL), newPayload);
-  return { id: ref.id, ...newPayload };
+  const ref = await addDoc(collection(db, COL), payload);
+  return { id: ref.id, ...payload };
 }
 
 export function reorderQuestions(refs: ExamQuestionRef[], fromIndex: number, toIndex: number): ExamQuestionRef[] {

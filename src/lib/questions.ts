@@ -1,7 +1,7 @@
 import {
   collection, doc, addDoc, updateDoc, deleteDoc, getDocs, getDoc, query,
   where, orderBy, limit as fbLimit, startAfter, writeBatch, serverTimestamp,
-  increment, QueryDocumentSnapshot, DocumentData,
+  increment, QueryDocumentSnapshot, DocumentData, documentId,
 } from "firebase/firestore";
 import { db } from "./firebase";
 import type { Question, Difficulty, QuestionType, QuestionVersion } from "@/types";
@@ -89,20 +89,22 @@ export async function getQuestion(id: string): Promise<Question | null> {
 }
 
 export async function getQuestionsByIds(ids: string[]): Promise<Question[]> {
-  if (ids.length === 0) return [];
+  if (!ids.length) return [];
   if (questionBankCache) {
     const map = new Map(questionBankCache.map((q) => [q.id, q]));
     const allFound = ids.map((id) => map.get(id)).filter(Boolean) as Question[];
     if (allFound.length === ids.length) return allFound;
   }
-  // Firestore has no "IN with >30" without chunking; chunk into groups of 30.
+  // One `in` query returns up to 30 documents, avoiding N individual RPCs.
   const chunks: string[][] = [];
   for (let i = 0; i < ids.length; i += 30) chunks.push(ids.slice(i, i + 30));
   const results: Question[] = [];
   for (const chunk of chunks) {
-    const snaps = await Promise.all(chunk.map((id) => getDoc(doc(db, COL, id))));
-    snaps.forEach((s) => s.exists() && results.push({ id: s.id, ...s.data() } as Question));
+    const snap = await getDocs(query(collection(db, COL), where(documentId(), "in", chunk)));
+    snap.docs.forEach((s) => results.push({ id: s.id, ...s.data() } as Question));
   }
+  const order = new Map(ids.map((id, index) => [id, index]));
+  results.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   return results;
 }
 
@@ -154,17 +156,22 @@ export async function createQuestion(
     stats: { timesAsked: 0, avgMarks: 0, correctPct: 0, incorrectPct: 0 },
   });
   const ref = await addDoc(collection(db, COL), payload);
-  const newQuestion: Question = {
+  const created: Question = {
     id: ref.id,
     ...(payload as any),
   };
+  // Patch the cache in place instead of invalidating it
   if (questionBankCache) {
-    questionBankCache = [newQuestion, ...questionBankCache];
+    questionBankCache = [created, ...questionBankCache];
   }
-  return newQuestion;
+  return created;
 }
 
-export async function updateQuestion(id: string, data: Partial<Question>, updatedBy?: string): Promise<void> {
+export async function updateQuestion(
+  id: string,
+  data: Partial<Question>,
+  updatedBy?: string
+): Promise<Question> {
   if (data.questionText) {
     const isDuplicate = await checkDuplicateQuestionText(data.questionText, id);
     if (isDuplicate) {
@@ -201,24 +208,25 @@ export async function updateQuestion(id: string, data: Partial<Question>, update
     console.error("Failed to snapshot previous question version:", err);
   }
 
-  const cleanData = stripUndefined({
+  const payload = stripUndefined({
     ...data,
     updatedAt: Date.now(),
     version: increment(1),
   });
-  await updateDoc(doc(db, COL, id), cleanData);
+
+  await updateDoc(doc(db, COL, id), payload);
+  const existing = questionBankCache?.find((q) => q.id === id);
+  const updated = {
+    ...(existing ?? {}),
+    ...data,
+    id,
+    updatedAt: payload.updatedAt as number,
+    version: (existing?.version ?? 0) + 1,
+  } as Question;
   if (questionBankCache) {
-    questionBankCache = questionBankCache.map((q) =>
-      q.id === id
-        ? {
-            ...q,
-            ...stripUndefined(data as Record<string, unknown>),
-            updatedAt: Date.now(),
-            version: (q.version || 1) + 1,
-          }
-        : q
-    );
+    questionBankCache = questionBankCache.map((q) => (q.id === id ? updated : q));
   }
+  return updated;
 }
 
 export async function getQuestionVersions(questionId: string): Promise<QuestionVersion[]> {
@@ -240,9 +248,7 @@ export async function getQuestionVersions(questionId: string): Promise<QuestionV
 
 export async function deleteQuestion(id: string): Promise<void> {
   await deleteDoc(doc(db, COL, id));
-  if (questionBankCache) {
-    questionBankCache = questionBankCache.filter((q) => q.id !== id);
-  }
+  if (questionBankCache) questionBankCache = questionBankCache.filter((q) => q.id !== id);
 }
 
 // Bulk insert used by the Excel importer.
@@ -254,12 +260,10 @@ export async function deleteQuestion(id: string): Promise<void> {
 //
 // Firestore rejects any field with value `undefined` and aborts the WHOLE
 // batch when it hits one — so every row is sanitized (undefined keys
-// stripped) before it's added to a batch. This was the actual cause of the
-// "fails partway through" bug: blank Comments cells produced `notes: undefined`.
+// stripped) before it's added to a batch.
 //
 // Failed batches are retried up to 3 times with exponential backoff before
-// being counted as failed and moving on — a transient network blip no longer
-// kills the rest of the import.
+// being counted as failed and moving on.
 
 async function commitWithRetry(batch: ReturnType<typeof writeBatch>, maxRetries = 3): Promise<{ ok: boolean; error?: string }> {
   let attempt = 0;
@@ -340,10 +344,8 @@ export async function bulkCreateQuestions(
 }
 
 export async function fetchAllModules(): Promise<string[]> {
-  // Denormalized read: pull all questions' module field. Fine at low thousands;
-  // if the bank grows past ~10k, maintain a separate `modules` collection instead.
-  const snap = await getDocs(collection(db, COL));
-  const set = new Set<string>();
-  snap.docs.forEach((d) => set.add((d.data() as Question).module));
-  return Array.from(set).sort();
+  // Reuse the already-loaded bank instead of issuing a second full collection
+  // read when the question browser and a module filter mount together.
+  const questions = await fetchAllQuestions();
+  return Array.from(new Set(questions.map((question) => question.module))).sort();
 }

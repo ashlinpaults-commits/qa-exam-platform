@@ -204,15 +204,28 @@ export function QuestionBankBrowser({
 
   async function handleDelete(id: string) {
     if (!confirm("Delete this question permanently?")) return;
-    await deleteQuestion(id);
-    setAllQuestions((prev) => prev.filter((q) => q.id !== id));
+    try {
+      await deleteQuestion(id);
+      invalidateQuestionBankCache();
+      setAllQuestions((prev) => prev.filter((q) => q.id !== id));
+    } catch (err) {
+      console.error("Failed to delete question", err);
+      setError(err instanceof Error ? err.message : "Couldn't delete question. Please retry.");
+    }
   }
 
-  function handleSaved() {
+  function handleSaved(saved?: Question) {
     setEditing(null);
-    fetchAllQuestions().then((questions) => {
-      setAllQuestions([...questions]);
-    });
+    if (saved) {
+      setAllQuestions((prev) => {
+        const exists = prev.some((q) => q.id === saved.id);
+        return exists ? prev.map((q) => (q.id === saved.id ? saved : q)) : [saved, ...prev];
+      });
+    } else {
+      fetchAllQuestions().then((questions) => {
+        setAllQuestions([...questions]);
+      });
+    }
   }
 
   function handleImported() {

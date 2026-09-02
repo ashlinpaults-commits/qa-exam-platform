@@ -138,6 +138,9 @@ export interface Exam {
   assessmentMode?: AssessmentMode;
   status: ExamStatus;
   questions: ExamQuestionRef[];
+  // Safe projection used by agents. Never put expectedAnswer or grading keys
+  // in this field; agents must not read the question bank directly.
+  questionSnapshots?: Record<string, Question>;
   assignedAgentIds: string[];
   batchId?: string;
   moduleScope?: string[];
@@ -315,6 +318,14 @@ export interface AttemptAnswer {
 
   // Audit trail for score changes
   scoreHistory?: ScoreHistoryEntry[];
+
+  // Full copy of the Question Bank question as it existed when this
+  // attempt was created. Historical attempts must always show what the
+  // agent actually saw/answered, even if the Question Bank entry is later
+  // edited or deleted. Optional so attempts created before this field
+  // existed remain representable; new attempts use the safe snapshot
+  // published on the exam.
+  questionSnapshot?: Question;
 }
 
 /* =========================================================
@@ -334,6 +345,11 @@ export interface ExamAttempt {
   attemptNumber: number;
 
   answers: AttemptAnswer[];
+
+  // Agent-owned draft answers. Kept separate from the auditor-owned `answers`
+  // array so Firestore rules can permit autosave without permitting score
+  // mutations inside a client-supplied array.
+  agentAnswers?: Record<string, string>;
 
   /* -------------------------
      Agent attempt lifecycle

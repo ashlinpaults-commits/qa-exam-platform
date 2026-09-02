@@ -7,7 +7,6 @@ import {
   query,
   where,
   orderBy,
-  writeBatch,
   runTransaction,
 } from "firebase/firestore";
 
@@ -25,6 +24,18 @@ import type {
 
 const COL = "attempts";
 
+function normalizeAgentAnswers(attempt: ExamAttempt): ExamAttempt {
+  const agentAnswers = attempt.agentAnswers ?? {};
+  return {
+    ...attempt,
+    answers: attempt.answers.map((answer) =>
+      Object.prototype.hasOwnProperty.call(agentAnswers, answer.questionId)
+        ? { ...answer, agentAnswer: agentAnswers[answer.questionId] }
+        : answer
+    ),
+  };
+}
+
 /* =========================================================
    FETCH ATTEMPTS FOR EXAM
    ========================================================= */
@@ -40,8 +51,8 @@ export async function fetchAttemptsForExam(
 
   const snap = await getDocs(q);
 
-  return snap.docs.map(
-    (d) => ({ id: d.id, ...d.data() } as ExamAttempt)
+  return snap.docs.map((d) =>
+    normalizeAgentAnswers({ id: d.id, ...d.data() } as ExamAttempt)
   );
 }
 
@@ -68,8 +79,8 @@ export async function fetchAttemptsForAgent(
 
   const snap = await getDocs(q);
 
-  return snap.docs.map(
-    (d) => ({ id: d.id, ...d.data() } as ExamAttempt)
+  return snap.docs.map((d) =>
+    normalizeAgentAnswers({ id: d.id, ...d.data() } as ExamAttempt)
   );
 }
 
@@ -83,7 +94,7 @@ export async function getAttempt(
   const snap = await getDoc(doc(db, COL, id));
 
   return snap.exists()
-    ? ({ id: snap.id, ...snap.data() } as ExamAttempt)
+    ? normalizeAgentAnswers({ id: snap.id, ...snap.data() } as ExamAttempt)
     : null;
 }
 
@@ -229,20 +240,30 @@ export async function startAttempt(
    * -------------------------------------------------------
    * CREATE ANSWERS
    * -------------------------------------------------------
+   *
+   * Each answer carries a full snapshot of the question as it exists
+   * right now. Question Bank entries can be edited or deleted later —
+   * this snapshot is what keeps this attempt showing exactly what the
+   * agent was actually asked, forever, regardless of future edits.
    */
 
-  const answers: AttemptAnswer[] = [
+  const orderedQuestionRefs = [
     ...exam.questions,
-  ]
-    .sort(
-      (a, b) =>
-        a.order - b.order
-    )
-    .map((question) => ({
-      questionId: question.questionId,
-      agentAnswer: "",
-      maxMarks: 10,
-    }));
+  ].sort(
+    (a, b) =>
+      a.order - b.order
+  );
+
+  // Agents cannot read the question bank (it contains answer keys). The
+  // auditor publishes a redacted snapshot on the exam instead.
+  const answers: AttemptAnswer[] = orderedQuestionRefs.map((question) => ({
+    questionId: question.questionId,
+    agentAnswer: "",
+    maxMarks: 10,
+    ...(exam.questionSnapshots?.[question.questionId]
+      ? { questionSnapshot: exam.questionSnapshots[question.questionId] }
+      : {}),
+  }));
 
   /*
    * -------------------------------------------------------
@@ -300,6 +321,7 @@ export async function startAttempt(
           agentId,
           attemptNumber,
           answers,
+          agentAnswers: {},
           startedAt: Date.now(),
           status: "in_progress",
           analyticsFinalized: false,
@@ -338,45 +360,61 @@ export async function saveAnswer(
   recordingUrl?: string,
   recordingMeta?: RecordingMetadata
 ) {
-  const updated = allAnswers.map((answer) => {
-    if (answer.questionId === questionId) {
-      const next: AttemptAnswer = {
-        ...answer,
-        agentAnswer,
-      };
+  const attemptRef = doc(db, COL, attemptId);
+  let updated: AttemptAnswer[] = allAnswers;
 
-      if (recordingUrl !== undefined) {
-        next.recordingUrl = recordingUrl;
-      }
-      if (recordingMeta !== undefined) {
-        next.recordingMeta = recordingMeta;
-      } else if (agentAnswer.startsWith("{") && agentAnswer.includes("recordingUrl")) {
-        try {
-          const parsed = JSON.parse(agentAnswer);
-          if (parsed.recordingUrl) {
-            next.recordingUrl = parsed.recordingUrl;
-            next.recordingMeta = {
-              source: parsed.source || "upload",
-              fileSize: parsed.fileSize,
-              duration: parsed.duration,
-              uploadedAt: parsed.uploadedAt || Date.now(),
-              fileName: parsed.fileName,
-              mimeType: parsed.mimeType,
-            };
-          }
-        } catch {
-          // Ignore JSON parse errors
+  // Merge against the latest server value with atomic transaction
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(attemptRef);
+    if (!snap.exists()) throw new Error("Attempt not found.");
+    const current = snap.data() as ExamAttempt;
+    if (current.status !== "in_progress") throw new Error("This attempt is no longer editable.");
+
+    const agentAnswers = {
+      ...(current.agentAnswers ?? {}),
+      [questionId]: agentAnswer,
+    };
+
+    updated = (current.answers ?? allAnswers).map((answer) => {
+      if (answer.questionId === questionId) {
+        const next: AttemptAnswer = {
+          ...answer,
+          agentAnswer,
+        };
+
+        if (recordingUrl !== undefined) {
+          next.recordingUrl = recordingUrl;
         }
+        if (recordingMeta !== undefined) {
+          next.recordingMeta = recordingMeta;
+        } else if (agentAnswer.startsWith("{") && agentAnswer.includes("recordingUrl")) {
+          try {
+            const parsed = JSON.parse(agentAnswer);
+            if (parsed.recordingUrl) {
+              next.recordingUrl = parsed.recordingUrl;
+              next.recordingMeta = {
+                source: parsed.source || "external_link",
+                fileSize: parsed.fileSize,
+                duration: parsed.duration,
+                uploadedAt: parsed.uploadedAt || Date.now(),
+                fileName: parsed.fileName,
+                mimeType: parsed.mimeType,
+              };
+            }
+          } catch {
+            // Ignore JSON parse errors
+          }
+        }
+        return next;
       }
-      return next;
-    }
-    return answer;
-  });
+      return answer;
+    });
 
-  await updateDoc(doc(db, COL, attemptId), {
-    answers: updated,
+    transaction.update(attemptRef, {
+      agentAnswers,
+      answers: updated,
+    });
   });
-
   return updated;
 }
 
@@ -493,69 +531,98 @@ export async function submitAttempt(
   attemptId: string,
   startedAt: number
 ) {
-  const attempt =
-    await getAttempt(attemptId);
-
-  if (!attempt) {
-    throw new Error(
-      "Attempt not found."
-    );
-  }
-
-  /*
-   * Already submitted.
-   * Treat this as idempotent instead of creating problems.
-   */
-  if (
-    attempt.status === "submitted" ||
-    attempt.status ===
-      "review_in_progress" ||
-    attempt.status === "reviewed"
-  ) {
-    return;
-  }
-
-  if (
-    attempt.status !== "in_progress"
-  ) {
-    throw new Error(
-      "This attempt cannot be submitted."
-    );
-  }
-
-  const now = Date.now();
-
-  const timeTakenSeconds =
-    Math.round(
-      (now - startedAt) / 1000
-    );
-
-  // Auto-score objective answers at submission time
-  const scoredAnswers = await Promise.all(
-    attempt.answers.map(async (ans) => {
-      try {
-        const q = await getQuestion(ans.questionId);
-        if (!q) return ans;
-        return autoScoreAnswer(ans, q);
-      } catch (err) {
-        console.error(`Auto-score failed for question ${ans.questionId}:`, err);
-        return ans;
-      }
-    })
+  const attemptRef = doc(
+    db,
+    COL,
+    attemptId
   );
 
-  await updateDoc(
-    doc(db, COL, attemptId),
-    {
-      answers: scoredAnswers,
-      status: "submitted",
-      submittedAt: now,
-      timeTakenSeconds,
+  /*
+   * A double-click, a network retry, or a refresh mid-submit can fire this
+   * twice. The old version did getAttempt() (read) then updateDoc() (write)
+   * with no atomicity between them, so two near-simultaneous calls could
+   * both pass the "already submitted?" check before either write landed.
+   * That never created a second attempt (the attempt doc already exists —
+   * this function only flips its status), but it could double-write and
+   * race on timeTakenSeconds. A transaction makes the check-then-write
+   * atomic and still idempotent on repeat calls.
+   */
+  await runTransaction(
+    db,
+    async (transaction) => {
+      const snap =
+        await transaction.get(
+          attemptRef
+        );
+
+      if (!snap.exists()) {
+        throw new Error(
+          "Attempt not found."
+        );
+      }
+
+      const attempt =
+        snap.data() as ExamAttempt;
+
+      /*
+       * Already submitted.
+       * Treat this as idempotent instead of creating problems.
+       */
+      if (
+        attempt.status === "submitted" ||
+        attempt.status ===
+          "review_in_progress" ||
+        attempt.status === "reviewed"
+      ) {
+        return;
+      }
+
+      if (
+        attempt.status !== "in_progress"
+      ) {
+        throw new Error(
+          "This attempt cannot be submitted."
+        );
+      }
+
+      const now = Date.now();
+
+      const timeTakenSeconds =
+        Math.round(
+          (now - startedAt) / 1000
+        );
+
+      // Auto-score objective answers at submission time
+      const scoredAnswers = await Promise.all(
+        attempt.answers.map(async (ans) => {
+          try {
+            const q = await getQuestion(ans.questionId);
+            if (!q) return ans;
+            return autoScoreAnswer(ans, q);
+          } catch (err) {
+            console.error(`Auto-score failed for question ${ans.questionId}:`, err);
+            return ans;
+          }
+        })
+      );
+
+      transaction.update(
+        attemptRef,
+        {
+          answers: scoredAnswers,
+          status: "submitted",
+          submittedAt: now,
+          timeTakenSeconds,
+        }
+      );
     }
   );
 
   // Check if all assigned agents have now completed
-  checkAndTransitionExamCompletion(attempt.examId).catch(console.error);
+  const currentAttempt = await getAttempt(attemptId);
+  if (currentAttempt) {
+    checkAndTransitionExamCompletion(currentAttempt.examId).catch(console.error);
+  }
 }
 
 /* =========================================================
@@ -566,6 +633,21 @@ export async function submitAttempt(
  * Save auditor scoring WITHOUT finalizing the review.
  *
  * This is the Save Draft operation.
+ *
+ * IMPORTANT — two-auditor concurrency:
+ * The old version mapped over the ANSWERS ARRAY PASSED IN BY THE CALLER
+ * (a snapshot of whatever the auditor's browser had loaded) and wrote that
+ * entire array back. If Auditor A opened the attempt, then Auditor B also
+ * opened it, then A scored Q4 and saved, B's browser still only knew about
+ * the pre-A state — so when B scored Q7 and saved, B's write silently
+ * reverted Q4 back to A's pre-save value. Classic stale-object overwrite.
+ *
+ * This now runs inside a Firestore transaction that reads the CURRENT
+ * document at commit time and only ever touches the ONE answer being
+ * scored — every other answer (including one another auditor just saved)
+ * passes through untouched. A finalized ("reviewed") attempt is also
+ * rejected here at the data layer, not just via a disabled button, since
+ * scores are meant to be locked once a review is finalized.
  */
 export async function saveReviewDraft(
   attempt: ExamAttempt,
@@ -575,120 +657,156 @@ export async function saveReviewDraft(
   scoredBy: string,
   knowledgeGapCategory?: KnowledgeGapCategory,
   changeReason?: string
-) {
+): Promise<ExamAttempt> {
   if (marks < 0) {
     throw new Error(
       "Marks cannot be below zero."
     );
   }
 
-  const target =
-    attempt.answers.find(
-      (answer) =>
-        answer.questionId ===
-        questionId
-    );
-
-  if (!target) {
-    throw new Error(
-      "Question answer not found."
-    );
-  }
-
-  if (
-    marks >
-    target.maxMarks
-  ) {
-    throw new Error(
-      `Marks cannot exceed ${target.maxMarks}.`
-    );
-  }
-
-  const answers =
-    attempt.answers.map(
-      (answer) => {
-        if (
-          answer.questionId !==
-          questionId
-        ) {
-          return answer;
-        }
-
-        const isChange =
-          answer.marks !==
-            undefined &&
-          answer.marks !== marks;
-
-        const history =
-          answer.scoreHistory ?? [];
-
-        const updatedAnswer:
-          AttemptAnswer = {
-          ...answer,
-
-          marks,
-
-          comments:
-            comments ?? "",
-
-          scoreHistory:
-            isChange
-              ? [
-                  ...history,
-                  {
-                    marks,
-                    changedBy:
-                      scoredBy,
-                    reason:
-                      changeReason?.trim() ||
-                      "Score updated during review",
-                    timestamp:
-                      Date.now(),
-                  },
-                ]
-              : history,
-        };
-
-        /*
-         * Firestore cannot store undefined.
-         *
-         * Only store a knowledge gap when
-         * the answer actually lost marks.
-         */
-        if (
-          marks <
-            answer.maxMarks &&
-          knowledgeGapCategory
-        ) {
-          updatedAnswer.knowledgeGapCategory =
-            knowledgeGapCategory;
-        } else {
-          delete updatedAnswer.knowledgeGapCategory;
-        }
-
-        return updatedAnswer;
-      }
-    );
-
-  const updateData = {
-    answers,
-    status:
-      "review_in_progress" as const,
-    reviewedBy: scoredBy,
-    reviewStartedAt:
-      attempt.reviewStartedAt ??
-      Date.now(),
-  };
-
-  await updateDoc(
-    doc(db, COL, attempt.id),
-    updateData
+  const attemptRef = doc(
+    db,
+    COL,
+    attempt.id
   );
 
-  return {
-    ...attempt,
-    ...updateData,
-  };
+  return runTransaction(
+    db,
+    async (transaction) => {
+      const snap =
+        await transaction.get(
+          attemptRef
+        );
+
+      if (!snap.exists()) {
+        throw new Error(
+          "Attempt not found."
+        );
+      }
+
+      const fresh = normalizeAgentAnswers({
+        id: snap.id,
+        ...snap.data(),
+      } as ExamAttempt);
+
+      /*
+       * Data-layer lock: once a review is finalized, this path can no
+       * longer silently reopen and rewrite it.
+       */
+      if (
+        fresh.status === "reviewed"
+      ) {
+        throw new Error(
+          "This review has already been finalized and can no longer be edited here."
+        );
+      }
+
+      const target =
+        fresh.answers.find(
+          (answer) =>
+            answer.questionId ===
+            questionId
+        );
+
+      if (!target) {
+        throw new Error(
+          "Question answer not found."
+        );
+      }
+
+      if (
+        marks >
+        target.maxMarks
+      ) {
+        throw new Error(
+          `Marks cannot exceed ${target.maxMarks}.`
+        );
+      }
+
+      const answers =
+        fresh.answers.map(
+          (answer) => {
+            if (
+              answer.questionId !==
+              questionId
+            ) {
+              return answer;
+            }
+
+            const isChange =
+              answer.marks !==
+                undefined &&
+              answer.marks !== marks;
+
+            const history =
+              answer.scoreHistory ?? [];
+
+            const updatedAnswer:
+              AttemptAnswer = {
+              ...answer,
+
+              marks,
+
+              comments:
+                comments ?? "",
+
+              scoreHistory:
+                isChange
+                  ? [
+                      ...history,
+                      {
+                        marks,
+                        changedBy:
+                          scoredBy,
+                        reason:
+                          changeReason?.trim() ||
+                          "Score updated during review",
+                        timestamp:
+                          Date.now(),
+                      },
+                    ]
+                  : history,
+            };
+
+            /*
+             * Firestore cannot store undefined.
+             *
+             * Only store a knowledge gap when
+             * the answer actually lost marks.
+             */
+            if (
+              marks <
+                answer.maxMarks &&
+              knowledgeGapCategory
+            ) {
+              updatedAnswer.knowledgeGapCategory =
+                knowledgeGapCategory;
+            } else {
+              delete updatedAnswer.knowledgeGapCategory;
+            }
+
+            return updatedAnswer;
+          }
+        );
+
+      const updateData = {
+        answers,
+        status:
+          "review_in_progress" as const,
+        reviewedBy: scoredBy,
+        reviewStartedAt:
+          fresh.reviewStartedAt ??
+          Date.now(),
+      };
+
+      transaction.update(
+        attemptRef,
+        updateData
+      );
+
+      return { ...fresh, ...updateData };
+    }
+  );
 }
 
 /* =========================================================
@@ -700,96 +818,132 @@ export async function saveReviewDraft(
  *
  * This is the ONLY operation that changes an attempt
  * to "reviewed".
+ *
+ * IMPORTANT — atomicity:
+ * The old version read the attempt once (getAttempt), computed totals from
+ * that read, then wrote the totals/status separately — with no atomicity
+ * between the "is this already reviewed?" check and the write. Two
+ * near-simultaneous calls (an accidental double-click, or a finalize that
+ * lands just as one last saveReviewDraft commits) could both pass the
+ * check and both write, one of them scoring from stale answers. The
+ * status check, total computation, and write now happen inside a single
+ * transaction against the CURRENT document, so finalize is atomic and the
+ * totals always reflect the latest saved scores.
  */
 export async function finalizeReview(
   attemptId: string,
   reviewerId: string
 ): Promise<ExamAttempt> {
-  const attempt =
-    await getAttempt(attemptId);
-
-  if (!attempt) {
-    throw new Error(
-      "Attempt not found."
-    );
-  }
-
-  /*
-   * Prevent accidental duplicate finalization.
-   */
-  if (
-    attempt.status === "reviewed"
-  ) {
-    return attempt;
-  }
-
-  if (
-    attempt.status !==
-      "submitted" &&
-    attempt.status !==
-      "review_in_progress"
-  ) {
-    throw new Error(
-      "This attempt is not available for review."
-    );
-  }
-
-  /*
-   * Every question must be scored.
-   */
-  const unscored =
-    attempt.answers.filter(
-      (answer) =>
-        answer.marks ===
-        undefined
-    );
-
-  if (
-    unscored.length > 0
-  ) {
-    throw new Error(
-      `${unscored.length} question(s) still need marks before the review can be submitted.`
-    );
-  }
-
-  /*
-   * Calculate totals.
-   */
-  const totalMarks =
-    attempt.answers.reduce(
-      (sum, answer) =>
-        sum +
-        (answer.marks ?? 0),
-      0
-    );
-
-  const maxTotalMarks =
-    attempt.answers.reduce(
-      (sum, answer) =>
-        sum +
-        answer.maxMarks,
-      0
-    );
-
-  const reviewedAt =
-    Date.now();
-
-  /*
-   * -------------------------------------------------------
-   * FINALIZE ATTEMPT
-   * -------------------------------------------------------
-   */
-
-  await updateDoc(
-    doc(db, COL, attempt.id),
-    {
-      totalMarks,
-      maxTotalMarks,
-      status: "reviewed",
-      reviewedBy: reviewerId,
-      reviewedAt,
-    }
+  const attemptRef = doc(
+    db,
+    COL,
+    attemptId
   );
+
+  const finalizedCore =
+    await runTransaction(
+      db,
+      async (transaction) => {
+        const snap =
+          await transaction.get(
+            attemptRef
+          );
+
+        if (!snap.exists()) {
+          throw new Error(
+            "Attempt not found."
+          );
+        }
+
+        const attempt = normalizeAgentAnswers({
+          id: snap.id,
+          ...snap.data(),
+        } as ExamAttempt);
+
+        /*
+         * Prevent accidental duplicate finalization.
+         */
+        if (
+          attempt.status ===
+          "reviewed"
+        ) {
+          return attempt;
+        }
+
+        if (
+          attempt.status !==
+            "submitted" &&
+          attempt.status !==
+            "review_in_progress"
+        ) {
+          throw new Error(
+            "This attempt is not available for review."
+          );
+        }
+
+        /*
+         * Every question must be scored.
+         */
+        const unscored =
+          attempt.answers.filter(
+            (answer) =>
+              answer.marks ===
+              undefined
+          );
+
+        if (
+          unscored.length > 0
+        ) {
+          throw new Error(
+            `${unscored.length} question(s) still need marks before the review can be submitted.`
+          );
+        }
+
+        /*
+         * Calculate totals from the CURRENT answers, not a
+         * potentially-stale earlier read.
+         */
+        const totalMarks =
+          attempt.answers.reduce(
+            (sum, answer) =>
+              sum +
+              (answer.marks ?? 0),
+            0
+          );
+
+        const maxTotalMarks =
+          attempt.answers.reduce(
+            (sum, answer) =>
+              sum +
+              answer.maxMarks,
+            0
+          );
+
+        const reviewedAt =
+          Date.now();
+
+        const updateData = {
+          totalMarks,
+          maxTotalMarks,
+          status:
+            "reviewed" as const,
+          reviewedBy: reviewerId,
+          reviewedAt,
+        };
+
+        transaction.update(
+          attemptRef,
+          updateData
+        );
+
+        return {
+          ...attempt,
+          ...updateData,
+        };
+      }
+    );
+
+  const attempt = finalizedCore;
 
   /*
    * -------------------------------------------------------
@@ -802,99 +956,127 @@ export async function finalizeReview(
   if (
     !attempt.analyticsFinalized
   ) {
-    const batch =
-      writeBatch(db);
-
+    /*
+     * Multiple agents share the same question bank, so two attempts that
+     * reference the same question can be finalized around the same time
+     * (e.g. an auditor clearing a review queue). The previous version did
+     * getQuestion() (read) then batch.update() (write) with the new stats
+     * computed from that read — a classic read-modify-write race: if two
+     * finalizations overlap, the second write silently clobbers the
+     * first's contribution to timesAsked/avgMarks/correctPct.
+     *
+     * Each question's stat update now runs in its own Firestore
+     * transaction, which reads the CURRENT doc at commit time and
+     * automatically retries if another transaction wrote to it first —
+     * so concurrent finalizations for the same question no longer lose
+     * data.
+     */
     for (
       const answer
       of attempt.answers
     ) {
-      const question =
-        await getQuestion(
-          answer.questionId
-        );
+      const questionRef = doc(
+        db,
+        "questions",
+        answer.questionId
+      );
 
-      if (!question) {
-        continue;
-      }
+      await runTransaction(
+        db,
+        async (transaction) => {
+          const snap =
+            await transaction.get(
+              questionRef
+            );
 
-      const previousTimesAsked =
-        question.stats
-          ?.timesAsked ?? 0;
+          if (!snap.exists()) {
+            return;
+          }
 
-      const previousAverage =
-        question.stats
-          ?.avgMarks ?? 0;
+          const question =
+            snap.data() as {
+              stats?: {
+                timesAsked?: number;
+                avgMarks?: number;
+                correctPct?: number;
+              };
+            };
 
-      const previousCorrectPct =
-        question.stats
-          ?.correctPct ?? 0;
+          const previousTimesAsked =
+            question.stats
+              ?.timesAsked ?? 0;
 
-      const previousCorrectCount =
-        Math.round(
-          (previousCorrectPct /
-            100) *
-            previousTimesAsked
-        );
+          const previousAverage =
+            question.stats
+              ?.avgMarks ?? 0;
 
-      const marks =
-        answer.marks ?? 0;
+          const previousCorrectPct =
+            question.stats
+              ?.correctPct ?? 0;
 
-      /*
-       * 70% or higher counts as correct
-       * for aggregate question analytics.
-       */
-      const isCorrect =
-        answer.maxMarks > 0 &&
-        marks /
-          answer.maxMarks >=
-          0.7;
+          const previousCorrectCount =
+            Math.round(
+              (previousCorrectPct /
+                100) *
+                previousTimesAsked
+            );
 
-      const newTimesAsked =
-        previousTimesAsked + 1;
+          const marks =
+            answer.marks ?? 0;
 
-      const newCorrectCount =
-        previousCorrectCount +
-        (isCorrect ? 1 : 0);
+          /*
+           * 70% or higher counts as correct
+           * for aggregate question analytics.
+           */
+          const isCorrect =
+            answer.maxMarks > 0 &&
+            marks /
+              answer.maxMarks >=
+              0.7;
 
-      const newAverage =
-        (
-          previousAverage *
-            previousTimesAsked +
-          marks
-        ) /
-        newTimesAsked;
+          const newTimesAsked =
+            previousTimesAsked + 1;
 
-      const correctPct =
-        (
-          newCorrectCount /
-          newTimesAsked
-        ) *
-        100;
+          const newCorrectCount =
+            previousCorrectCount +
+            (isCorrect ? 1 : 0);
 
-      batch.update(
-        doc(
-          db,
-          "questions",
-          answer.questionId
-        ),
-        {
-          stats: {
-            timesAsked:
-              newTimesAsked,
+          const newAverage =
+            (
+              previousAverage *
+                previousTimesAsked +
+              marks
+            ) /
+            newTimesAsked;
 
-            avgMarks:
-              newAverage,
+          const correctPct =
+            (
+              newCorrectCount /
+              newTimesAsked
+            ) *
+            100;
 
-            correctPct,
+          transaction.update(
+            questionRef,
+            {
+              stats: {
+                timesAsked:
+                  newTimesAsked,
 
-            incorrectPct:
-              100 -
-              correctPct,
-          },
+                avgMarks:
+                  newAverage,
 
-          updatedAt:
-            Date.now(),
+                correctPct,
+
+                incorrectPct:
+                  100 -
+                  correctPct,
+              },
+
+              updatedAt:
+                Date.now(),
+            }
+          );
         }
       );
     }
@@ -902,7 +1084,7 @@ export async function finalizeReview(
     /*
      * Mark analytics as processed.
      */
-    batch.update(
+    await updateDoc(
       doc(
         db,
         COL,
@@ -913,8 +1095,6 @@ export async function finalizeReview(
           true,
       }
     );
-
-    await batch.commit();
   }
 
   /*
