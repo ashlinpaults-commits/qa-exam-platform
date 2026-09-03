@@ -6,6 +6,8 @@ import {
   fetchAttemptsForExam,
   saveReviewDraft,
   finalizeReview,
+  computeMergedScorecard,
+  MergedScorecard,
 } from "@/lib/attempts";
 import { getQuestionsByIds } from "@/lib/questions";
 import { fetchAllUsers } from "@/lib/users";
@@ -18,7 +20,8 @@ import type {
   KnowledgeGapCategory,
 } from "@/types";
 import { AnswerDisplay } from "@/components/questions/AnswerDisplay";
-import { Badge, EmptyState } from "@/components/ui/Primitives";
+import { QuestionContent } from "@/components/questions/QuestionContent";
+import { Badge, EmptyState, Modal } from "@/components/ui/Primitives";
 import {
   ChevronDown,
   ChevronRight,
@@ -26,7 +29,10 @@ import {
   Save,
   CheckCircle2,
   AlertTriangle,
+  Pencil,
+  Layers,
 } from "lucide-react";
+import { AmendScorecardModal } from "./AmendScorecardModal";
 
 const KNOWLEDGE_GAPS: KnowledgeGapCategory[] = [
   "Product Knowledge",
@@ -61,6 +67,21 @@ export function ReviewScreen() {
     type: "success" | "error";
     text: string;
   } | null>(null);
+
+  // Amend Scorecard & Merged Scorecard State
+  const [amendingAttempt, setAmendingAttempt] = useState<ExamAttempt | null>(null);
+  const [viewingMergedAgentId, setViewingMergedAgentId] = useState<string | null>(null);
+
+  const selectedExamDoc = useMemo(
+    () => exams.find((e) => e.id === selectedExam),
+    [exams, selectedExam]
+  );
+
+  const mergedScorecardData = useMemo(() => {
+    if (!viewingMergedAgentId || !selectedExamDoc) return null;
+    const agentAttempts = attempts.filter((a) => a.agentId === viewingMergedAgentId);
+    return computeMergedScorecard(selectedExamDoc, agentAttempts);
+  }, [viewingMergedAgentId, selectedExamDoc, attempts]);
 
   useEffect(() => {
     Promise.all([fetchExams(), fetchAllUsers()])
@@ -310,10 +331,17 @@ export function ReviewScreen() {
                     )}
 
                     <div className="min-w-0">
-                      <p className="font-medium">
-                        {userName(attempt.agentId)} - Attempt #
-                        {attempt.attemptNumber}
-                      </p>
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium">
+                          {userName(attempt.agentId)} · Attempt #
+                          {attempt.attemptNumber}
+                        </p>
+                        {attempt.attemptNumber > 1 && (
+                          <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-semibold text-brand-700 dark:bg-brand-950/40 dark:text-brand-300">
+                            Reattempt{attempt.reattemptSource ? ` · ${attempt.reattemptSource.replace("_", " ")}` : ""}
+                          </span>
+                        )}
+                      </div>
 
                       <p className="text-xs text-slate-500">
                         {attempt.timeTakenSeconds
@@ -330,6 +358,21 @@ export function ReviewScreen() {
                   </div>
 
                   <div className="flex shrink-0 items-center gap-2">
+                    {attempts.filter((a) => a.agentId === attempt.agentId && a.status === "reviewed").length > 1 && (
+                      <button
+                        type="button"
+                        className="flex items-center gap-1 rounded-lg border border-brand-200 bg-white px-2 py-1 text-[11px] font-semibold text-brand-700 shadow-sm hover:bg-brand-50 dark:border-brand-800 dark:bg-slate-800 dark:text-brand-300 dark:hover:bg-brand-950/40"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setViewingMergedAgentId(attempt.agentId);
+                        }}
+                        title="View consolidated best/latest scorecard across attempts"
+                      >
+                        <Layers className="h-3 w-3" />
+                        Consolidated Score
+                      </button>
+                    )}
+
                     {attempt.status !== "reviewed" &&
                       reviewedCount > 0 && (
                         <Badge color="brand">
@@ -398,7 +441,7 @@ export function ReviewScreen() {
 
                         <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
                           <div
-                            className="h-full bg-blue-600 transition-all"
+                            className="h-full bg-brand-600 transition-all"
                             style={{
                               width: `${
                                 attempt.answers.length
@@ -426,25 +469,46 @@ export function ReviewScreen() {
                         // without a snapshot fall back to the live cache
                         // entirely.
                         const live = questionCache[ans.questionId];
+                        const examSnapshot = selectedExamDoc?.questionSnapshots?.[ans.questionId];
                         const q = ans.questionSnapshot
                           ? {
                               ...ans.questionSnapshot,
                               expectedAnswer:
                                 live?.expectedAnswer ??
+                                examSnapshot?.expectedAnswer ??
                                 ans.questionSnapshot.expectedAnswer,
                               correctOptionIndex:
                                 live?.correctOptionIndex ??
+                                examSnapshot?.correctOptionIndex ??
                                 ans.questionSnapshot.correctOptionIndex,
                             }
-                          : live;
+                          : (live || examSnapshot);
 
-                        if (!q) return null;
+                        const questionText = q?.questionText || live?.questionText || examSnapshot?.questionText || `Question ${index + 1}`;
+
+                        const fallbackQuestion: Question = {
+                          id: ans.questionId,
+                          module: live?.module || examSnapshot?.module || "General",
+                          feature: live?.feature || examSnapshot?.feature || "Question",
+                          difficulty: live?.difficulty || examSnapshot?.difficulty || "medium",
+                          tags: live?.tags || examSnapshot?.tags || [],
+                          type: live?.type || examSnapshot?.type || "descriptive",
+                          questionText: questionText,
+                          expectedAnswer: live?.expectedAnswer ?? examSnapshot?.expectedAnswer ?? "(Reference answer unavailable)",
+                          version: 1,
+                          createdBy: "",
+                          createdAt: 0,
+                          updatedAt: 0,
+                          stats: { timesAsked: 0, avgMarks: 0, correctPct: 0, incorrectPct: 0 },
+                        };
+
+                        const questionToRender = q || fallbackQuestion;
 
                         return (
                           <QuestionScoreRow
                             key={ans.questionId}
                             number={index + 1}
-                            question={q}
+                            question={questionToRender}
                             answer={ans}
                             attempt={attempt}
                             reviewerId={profile?.uid ?? ""}
@@ -496,9 +560,9 @@ export function ReviewScreen() {
                     )}
 
                     {attempt.status === "reviewed" && (
-                      <div className="mt-5 rounded-xl border border-green-200 bg-green-50 p-4 dark:border-green-800 dark:bg-green-900/20">
+                      <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-green-200 bg-green-50 p-4 dark:border-green-800 dark:bg-green-900/20">
                         <div className="flex items-center gap-2">
-                          <CheckCircle2 className="h-5 w-5 text-green-600" />
+                          <CheckCircle2 className="h-5 w-5 shrink-0 text-green-600" />
 
                           <div>
                             <p className="font-semibold text-green-800 dark:text-green-300">
@@ -517,6 +581,15 @@ export function ReviewScreen() {
                             </p>
                           </div>
                         </div>
+
+                        <button
+                          type="button"
+                          className="btn-secondary ml-auto flex items-center gap-1.5 text-xs font-semibold shadow-sm"
+                          onClick={() => setAmendingAttempt(attempt)}
+                        >
+                          <Pencil className="h-3.5 w-3.5 text-brand-600" />
+                          Amend Scorecard
+                        </button>
                       </div>
                     )}
                   </div>
@@ -526,6 +599,92 @@ export function ReviewScreen() {
           })}
         </div>
       )}
+
+      {/* Amend Scorecard Modal */}
+      {amendingAttempt && (
+        <AmendScorecardModal
+          open={!!amendingAttempt}
+          onClose={() => setAmendingAttempt(null)}
+          attempt={amendingAttempt}
+          reviewerId={profile?.uid ?? ""}
+          questionSnapshots={selectedExamDoc?.questionSnapshots ?? questionCache}
+          onAmended={(updated) => {
+            patchAttempt(updated);
+            setAmendingAttempt(null);
+          }}
+        />
+      )}
+
+      {/* Merged / Consolidated Scorecard Modal */}
+      <Modal
+        open={!!viewingMergedAgentId}
+        onClose={() => setViewingMergedAgentId(null)}
+        title={`Consolidated Scorecard — ${userName(viewingMergedAgentId || "")}`}
+        wide
+      >
+        {mergedScorecardData && (
+          <div className="space-y-4 text-xs">
+            {/* Summary Metrics */}
+            <div className="flex items-center justify-between rounded-xl border border-brand-200 bg-brand-50/50 p-4 dark:border-brand-800/60 dark:bg-brand-950/20">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-300">
+                  Consolidated Best/Latest Score
+                </p>
+                <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100">
+                  {mergedScorecardData.totalMarks} / {mergedScorecardData.maxTotalMarks}{" "}
+                  <span className="text-base font-medium text-brand-600">({mergedScorecardData.percentage}%)</span>
+                </p>
+              </div>
+              <div className="text-right">
+                <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold shadow-sm dark:border-slate-700 dark:bg-slate-800">
+                  Merged across {mergedScorecardData.attemptsCount} attempts
+                </span>
+              </div>
+            </div>
+
+            {/* Answer List */}
+            <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+              {mergedScorecardData.mergedAnswers.map((ans, idx) => (
+                <div key={ans.questionId} className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <span className="font-mono font-bold text-slate-500">#{idx + 1}</span>
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                      Sourced from Attempt #{ans.sourceAttemptNumber}
+                    </span>
+                    <span
+                      className={`ml-auto font-bold ${
+                        (ans.marks ?? 0) >= ans.maxMarks ? "text-emerald-600" : "text-amber-600"
+                      }`}
+                    >
+                      {ans.marks ?? 0} / {ans.maxMarks} marks
+                    </span>
+                  </div>
+                  <p className="mb-1 line-clamp-2 font-medium text-slate-800 dark:text-slate-200">
+                    {ans.questionSnapshot?.questionText ||
+                      selectedExamDoc?.questionSnapshots?.[ans.questionId]?.questionText ||
+                      questionCache[ans.questionId]?.questionText ||
+                      `Question #${idx + 1}`}
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    <strong>Agent Answer:</strong> {ans.agentAnswer || "(empty)"}
+                  </p>
+                  {ans.comments && (
+                    <p className="mt-0.5 text-[11px] text-brand-600">
+                      <strong>Auditor Comment:</strong> {ans.comments}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="flex justify-end border-t border-slate-100 pt-2 dark:border-slate-800">
+              <button type="button" className="btn-secondary" onClick={() => setViewingMergedAgentId(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -660,9 +819,9 @@ function QuestionScoreRow({
             Question {number}
           </p>
 
-          <p className="mt-1 text-sm font-medium">
-            {question.questionText}
-          </p>
+          <div className="mt-1">
+            <QuestionContent content={question.questionText} className="text-sm font-medium text-slate-800 dark:text-slate-100" />
+          </div>
         </div>
 
         <Badge

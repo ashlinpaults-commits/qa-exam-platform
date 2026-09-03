@@ -36,6 +36,9 @@ export interface Question {
   // Used to detect duplicates across separate import runs.
   sourceId?: string;
 
+  // Normalized substantive content fingerprint for cross-exam deduplication
+  fingerprint?: string;
+
   // Type-specific payloads
   options?: string[];
   correctOptionIndex?: number;
@@ -87,6 +90,8 @@ export interface Exam {
   id: string;
   name: string;
   description: string;
+  category?: "Revenue Cycle Management" | "Patient Engagement";
+  examDate?: string;
   mode: ExamMode;
   assessmentMode?: AssessmentMode;
   status: ExamStatus;
@@ -95,12 +100,22 @@ export interface Exam {
   // in this field; agents must not read the question bank directly.
   questionSnapshots?: Record<string, Question>;
   assignedAgentIds: string[];
+  // Reattempt authorizations granted by auditors per agent
+  reattemptPermissions?: Record<string, ReattemptPermission>;
   batchId?: string;
   moduleScope?: string[];
   timeLimitMinutes?: number;
   createdBy: string;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface ReattemptPermission {
+  agentId: string;
+  mode: "same_questions" | "wrong_answers" | "select_questions";
+  questionIds?: string[];
+  grantedAt: number;
+  grantedBy: string;
 }
 
 /* =========================================================
@@ -283,6 +298,11 @@ export interface ExamAttempt {
   examId: string;
   agentId: string;
   attemptNumber: number;
+
+  // Reattempt identification
+  isReattempt?: boolean;
+  parentAttemptId?: string;
+  reattemptSource?: "same_questions" | "wrong_answers" | "manual_selection";
 
   answers: AttemptAnswer[];
 

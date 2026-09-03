@@ -5,6 +5,9 @@ import { useEffect, useMemo, useState } from "react";
 import { getExam } from "@/lib/exams";
 import { fetchAttemptsForExam } from "@/lib/attempts";
 import { fetchAllUsers } from "@/lib/users";
+import { RoleGate } from "@/components/auth/RoleGate";
+import { AppShell } from "@/components/layout/AppShell";
+import { AuditorNav } from "@/components/layout/AuditorNav";
 
 import AgentPerformanceTable from "@/components/reports/AgentPerformanceTable";
 
@@ -166,56 +169,55 @@ export default function ReportPage({
   }
 
   return (
-    <div className="min-h-screen bg-slate-100 p-8">
-      <div className="mx-auto max-w-7xl rounded-2xl bg-white p-8 shadow">
+    <RoleGate allow={["auditor"]}>
+      <AppShell>
+        <AuditorNav />
 
-        <h1 className="text-4xl font-bold">
-          Training Assessment Report
-        </h1>
+        <div className="rounded-2xl bg-white p-6 shadow-sm border border-slate-200 dark:border-slate-800 dark:bg-slate-900">
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+            Training Assessment Report
+          </h1>
 
-        <p className="mt-2 text-slate-500">
-          {exam.name}
-        </p>
+          <p className="mt-1 text-slate-500">
+            {exam.name}
+          </p>
 
-        <p className="text-sm text-slate-400">
-          Generated{" "}
-          {new Date().toLocaleDateString()}
-        </p>
+          <p className="text-xs text-slate-400">
+            Generated {new Date().toLocaleDateString()}
+          </p>
 
-        <hr className="my-8" />
+          <hr className="my-6 border-slate-100 dark:border-slate-800" />
 
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <StatCard
+              title="Average Score"
+              value={`${averageScore}%`}
+            />
 
-          <StatCard
-            title="Average Score"
-            value={`${averageScore}%`}
-          />
+            <StatCard
+              title="Highest Score"
+              value={`${highestScore}%`}
+            />
 
-          <StatCard
-            title="Highest Score"
-            value={`${highestScore}%`}
-          />
+            <StatCard
+              title="Completed"
+              value={String(completed)}
+            />
 
-          <StatCard
-            title="Completed"
-            value={String(completed)}
-          />
+            <StatCard
+              title="Pending Review"
+              value={String(pending)}
+            />
+          </div>
 
-          <StatCard
-            title="Pending Review"
-            value={String(pending)}
-          />
-
+          <div className="mt-8">
+            <AgentPerformanceTable
+              rows={agentRows}
+            />
+          </div>
         </div>
-
-        <div className="mt-10">
-          <AgentPerformanceTable
-            rows={agentRows}
-          />
-        </div>
-
-      </div>
-    </div>
+      </AppShell>
+    </RoleGate>
   );
 }
 

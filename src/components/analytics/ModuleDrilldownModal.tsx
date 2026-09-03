@@ -527,7 +527,7 @@ export function ModuleDrilldownModal({
 
                                 <div className="h-1.5 w-20 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                                   <div
-                                    className="h-full rounded-full bg-indigo-500"
+                                    className="h-full rounded-full bg-brand-500"
                                     style={{
                                       width: `${Math.min(
                                         100,

@@ -13,7 +13,11 @@ import {
 import {
   TrendingUp,
   TrendingDown,
+  FileText,
+  RotateCcw,
 } from "lucide-react";
+import { AgentScorecardModal } from "./AgentScorecardModal";
+import { deriveCleanTitle } from "@/components/exam-builder/ExamListScreen";
 
 export function AgentDashboardContent() {
   const { profile } = useAuth();
@@ -21,6 +25,7 @@ export function AgentDashboardContent() {
   const [exams, setExams] = useState<Exam[]>([]);
   const [attempts, setAttempts] = useState<ExamAttempt[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selectedAttemptForModal, setSelectedAttemptForModal] = useState<ExamAttempt | null>(null);
 
   /**
    * Load the dashboard from Firestore.
@@ -111,68 +116,87 @@ export function AgentDashboardContent() {
    * -------------------------------------------------------
    */
 
-  const overallScorePct = reviewed.length
-    ? Math.round(
-        (reviewed.reduce(
-          (sum, attempt) =>
-            sum +
-            (attempt.totalMarks ?? 0) /
-              (attempt.maxTotalMarks ?? 1),
-          0
-        ) /
-          reviewed.length) *
-          100
-      )
+  /**
+   * Group reviewed attempts by examId to isolate authoritative latest attempts.
+   * This prevents multiple reattempts for the same exam from distorting competency.
+   */
+  const reviewedByExam = new Map<string, ExamAttempt[]>();
+  for (const attempt of reviewed) {
+    if (!attempt.examId) continue;
+    const list = reviewedByExam.get(attempt.examId) || [];
+    list.push(attempt);
+    reviewedByExam.set(attempt.examId, list);
+  }
+
+  const authoritativeReviewedAttempts: ExamAttempt[] = [];
+  for (const [, examAttempts] of reviewedByExam.entries()) {
+    // Sort descending by attemptNumber, then reviewedAt/startedAt timestamp
+    const sorted = [...examAttempts].sort(
+      (a, b) =>
+        (b.attemptNumber ?? 0) - (a.attemptNumber ?? 0) ||
+        (b.reviewedAt ?? 0) - (a.reviewedAt ?? 0) ||
+        (b.startedAt ?? 0) - (a.startedAt ?? 0)
+    );
+    if (sorted.length > 0) {
+      authoritativeReviewedAttempts.push(sorted[0]);
+    }
+  }
+
+  // Calculate overall competency using ONE authoritative result per unique exam
+  const totalCompetencyPct = authoritativeReviewedAttempts.reduce((sum, attempt) => {
+    const total = attempt.totalMarks ?? 0;
+    const max = attempt.maxTotalMarks ?? 0;
+    if (max <= 0) return sum;
+    const pct = total / max;
+    return sum + (Number.isFinite(pct) ? pct : 0);
+  }, 0);
+
+  const overallScorePct = authoritativeReviewedAttempts.length > 0
+    ? Math.round((totalCompetencyPct / authoritativeReviewedAttempts.length) * 100)
     : 0;
 
-  const perfectExams = reviewed.filter(
+  const perfectExams = authoritativeReviewedAttempts.filter(
     (attempt) =>
+      Boolean(attempt.maxTotalMarks) &&
+      attempt.maxTotalMarks! > 0 &&
       attempt.totalMarks === attempt.maxTotalMarks
   ).length;
 
-  const examScoreByExam: Record<
-    string,
-    {
-      total: number;
-      max: number;
-    }
-  > = {};
+  /**
+   * Evaluate Strong Areas (>= 85%) and Weak Areas (< 70%) per unique exam.
+   * Uses authoritative attempt per exam and enforces mutual exclusivity.
+   */
+  const examCompetencies: { name: string; pct: number }[] = [];
 
-  reviewed.forEach((attempt) => {
-    const exam = exams.find(
-      (item) => item.id === attempt.examId
-    );
+  for (const attempt of authoritativeReviewedAttempts) {
+    const exam = exams.find((item) => item.id === attempt.examId);
+    if (!exam) continue;
 
-    if (!exam) return;
+    const max = attempt.maxTotalMarks ?? 0;
+    if (max <= 0) continue;
+    const total = attempt.totalMarks ?? 0;
+    const pct = total / max;
+    if (!Number.isFinite(pct)) continue;
 
-    const current = examScoreByExam[exam.name] ?? {
-      total: 0,
-      max: 0,
-    };
+    const cleanTitle = deriveCleanTitle(exam, 0).title;
+    examCompetencies.push({
+      name: cleanTitle,
+      pct,
+    });
+  }
 
-    current.total += attempt.totalMarks ?? 0;
-    current.max += attempt.maxTotalMarks ?? 0;
+  // Strong: ONLY >= 85% (0.85), sorted highest first, limit to at most 2 items
+  const strongQualifying = examCompetencies
+    .filter((item) => item.pct >= 0.85)
+    .sort((a, b) => b.pct - a.pct);
+  const strong = strongQualifying.slice(0, 2).map((item) => item.name);
+  const strongSet = new Set(strong);
 
-    examScoreByExam[exam.name] = current;
-  });
-
-  const ranked = Object.entries(examScoreByExam)
-    .map(([name, values]) => ({
-      name,
-      pct: values.max
-        ? values.total / values.max
-        : 0,
-    }))
+  // Weak: ONLY < 70% (0.70), mutually exclusive (!strongSet.has), sorted lowest first, limit to at most 2 items
+  const weakQualifying = examCompetencies
+    .filter((item) => item.pct < 0.70 && !strongSet.has(item.name))
     .sort((a, b) => a.pct - b.pct);
-
-  const weak = ranked
-    .slice(0, 2)
-    .map((item) => item.name);
-
-  const strong = ranked
-    .slice(-2)
-    .map((item) => item.name)
-    .reverse();
+  const weak = weakQualifying.slice(0, 2).map((item) => item.name);
 
   /**
    * Improvement indicator.
@@ -229,7 +253,15 @@ export function AgentDashboardContent() {
     }
 
     /**
-     * Normal exams do not retry.
+     * If auditor granted explicit reattempt permission, it is available to take.
+     */
+    const hasReattemptPermission = Boolean(profile?.uid && exam.reattemptPermissions?.[profile.uid]);
+    if (hasReattemptPermission) {
+      return true;
+    }
+
+    /**
+     * Normal exams do not retry without explicit permission.
      */
     if (exam.mode !== "until_perfect") {
       return false;
@@ -322,29 +354,33 @@ export function AgentDashboardContent() {
 
         {(weak.length > 0 || strong.length > 0) && (
           <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Weak Areas
-              </p>
+            {weak.length > 0 && (
+              <div>
+                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Weak Areas
+                </p>
 
-              <ul className="text-sm">
-                {weak.map((item) => (
-                  <li key={item}>• {item}</li>
-                ))}
-              </ul>
-            </div>
+                <ul className="text-sm">
+                  {weak.map((item) => (
+                    <li key={item}>• {item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
-            <div>
-              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Strong Areas
-              </p>
+            {strong.length > 0 && (
+              <div>
+                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Strong Areas
+                </p>
 
-              <ul className="text-sm">
-                {strong.map((item) => (
-                  <li key={item}>• {item}</li>
-                ))}
-              </ul>
-            </div>
+                <ul className="text-sm">
+                  {strong.map((item) => (
+                    <li key={item}>• {item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -363,7 +399,7 @@ export function AgentDashboardContent() {
           />
         ) : (
           <div className="space-y-2">
-            {assignedNotStarted.map((exam) => {
+            {assignedNotStarted.map((exam, index) => {
               const examAttempts = attempts
                 .filter(
                   (attempt) =>
@@ -409,6 +445,10 @@ export function AgentDashboardContent() {
               const nextAttemptNumber =
                 highestAttemptNumber + 1;
 
+              const hasReattemptPermission = Boolean(profile?.uid && exam.reattemptPermissions?.[profile.uid]);
+
+              const cleanTitle = deriveCleanTitle(exam, index).title;
+
               return (
                 <div
                   key={exam.id}
@@ -417,12 +457,18 @@ export function AgentDashboardContent() {
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="font-medium">
-                        {exam.name}
+                        {cleanTitle}
                       </p>
 
                       {isRetest && (
                         <Badge color="amber">
                           Re-Exam Required
+                        </Badge>
+                      )}
+
+                      {hasReattemptPermission && !isRetest && (
+                        <Badge color="brand">
+                          Reattempt Authorized
                         </Badge>
                       )}
                     </div>
@@ -435,7 +481,7 @@ export function AgentDashboardContent() {
                         : "Normal"}
                     </p>
 
-                    {isRetest &&
+                    {(isRetest || hasReattemptPermission) &&
                       latestReviewed && (
                         <p className="mt-1 text-sm font-medium text-amber-600 dark:text-amber-400">
                           Attempt #
@@ -454,7 +500,7 @@ export function AgentDashboardContent() {
                     href={`/agent/exams/${exam.id}/take`}
                     className="btn-primary"
                   >
-                    {isRetest
+                    {isRetest || hasReattemptPermission
                       ? `Start Attempt #${nextAttemptNumber}`
                       : "Start Exam"}
                   </Link>
@@ -480,6 +526,8 @@ export function AgentDashboardContent() {
                   item.id === attempt.examId
               );
 
+              const cleanTitle = exam ? deriveCleanTitle(exam, 0).title : "Exam";
+
               return (
                 <div
                   key={attempt.id}
@@ -487,7 +535,7 @@ export function AgentDashboardContent() {
                 >
                   <div>
                     <p className="font-medium">
-                      {exam?.name ?? "Exam"} — Attempt #
+                      {cleanTitle} — Attempt #
                       {attempt.attemptNumber}
                     </p>
 
@@ -524,6 +572,8 @@ export function AgentDashboardContent() {
                   item.id === attempt.examId
               );
 
+              const cleanTitle = exam ? deriveCleanTitle(exam, 0).title : "Exam";
+
               return (
                 <div
                   key={attempt.id}
@@ -531,7 +581,7 @@ export function AgentDashboardContent() {
                 >
                   <div>
                     <p className="font-medium">
-                      {exam?.name ?? "Exam"} — Attempt #
+                      {cleanTitle} — Attempt #
                       {attempt.attemptNumber}
                     </p>
 
@@ -543,12 +593,21 @@ export function AgentDashboardContent() {
                     </p>
                   </div>
 
-                  <Badge color="amber">
-                    {attempt.status ===
-                    "review_in_progress"
-                      ? "Under Review"
-                      : "Needs Review"}
-                  </Badge>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="btn-secondary text-xs"
+                      onClick={() => setSelectedAttemptForModal(attempt)}
+                    >
+                      View Answers
+                    </button>
+                    <Badge color="amber">
+                      {attempt.status ===
+                      "review_in_progress"
+                        ? "Under Review"
+                        : "Needs Review"}
+                    </Badge>
+                  </div>
                 </div>
               );
             })}
@@ -582,6 +641,8 @@ export function AgentDashboardContent() {
                   attempt.totalMarks ===
                     attempt.maxTotalMarks;
 
+                const cleanTitle = exam ? deriveCleanTitle(exam, 0).title : "Exam";
+
                 return (
                   <div
                     key={attempt.id}
@@ -589,7 +650,7 @@ export function AgentDashboardContent() {
                   >
                     <div>
                       <p className="font-medium">
-                        {exam?.name ?? "Exam"} — Attempt #
+                        {cleanTitle} — Attempt #
                         {attempt.attemptNumber}
                       </p>
 
@@ -598,27 +659,53 @@ export function AgentDashboardContent() {
                       </p>
                     </div>
 
-                    {attempt.maxTotalMarks ? (
-                      <Badge
-                        color={
-                          perfect
-                            ? "green"
-                            : "brand"
-                        }
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="btn-secondary flex items-center gap-1.5 text-xs shadow-sm"
+                        onClick={() => setSelectedAttemptForModal(attempt)}
                       >
-                        {attempt.totalMarks ?? 0}/
-                        {attempt.maxTotalMarks}
-                      </Badge>
-                    ) : (
-                      <Badge color="slate">
-                        Reviewed
-                      </Badge>
-                    )}
+                        <FileText className="h-3.5 w-3.5 text-brand-600" />
+                        View Scorecard
+                      </button>
+
+                      {attempt.maxTotalMarks ? (
+                        <Badge
+                          color={
+                            perfect
+                              ? "green"
+                              : "brand"
+                          }
+                        >
+                          {attempt.totalMarks ?? 0}/
+                          {attempt.maxTotalMarks}
+                        </Badge>
+                      ) : (
+                        <Badge color="slate">
+                          Reviewed
+                        </Badge>
+                      )}
+                    </div>
                   </div>
                 );
               })}
           </div>
         </div>
+      )}
+
+      {/* Agent Scorecard & Submitted Answers Modal */}
+      {selectedAttemptForModal && (
+        <AgentScorecardModal
+          open={!!selectedAttemptForModal}
+          onClose={() => setSelectedAttemptForModal(null)}
+          attempt={selectedAttemptForModal}
+          examName={
+            exams.find((e) => e.id === selectedAttemptForModal.examId)
+              ? deriveCleanTitle(exams.find((e) => e.id === selectedAttemptForModal.examId)!, 0).title
+              : "Exam"
+          }
+          questionSnapshots={exams.find((e) => e.id === selectedAttemptForModal.examId)?.questionSnapshots}
+        />
       )}
     </div>
   );

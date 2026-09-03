@@ -8,6 +8,7 @@ service cloud.firestore {
 
     function isAuditor() {
       return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
         && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "auditor";
     }
 
@@ -41,10 +42,15 @@ service cloud.firestore {
     }
 
     match /exams/{examId} {
-      allow read: if isAuditor()
+      allow get: if resource == null
         || (signedIn()
           && resource.data.assignedAgentIds.hasAny([request.auth.uid])
-          && (resource.data.status == "published" || resource.data.status == "active"));
+          && (resource.data.status == "published" || resource.data.status == "active"))
+        || isAuditor();
+      allow list: if (signedIn()
+          && resource.data.assignedAgentIds.hasAny([request.auth.uid])
+          && (resource.data.status == "published" || resource.data.status == "active"))
+        || isAuditor();
       allow create: if isAuditor()
         && request.resource.data.createdBy == request.auth.uid;
       allow update: if isAuditor()
@@ -53,23 +59,21 @@ service cloud.firestore {
     }
 
     match /attempts/{attemptId} {
-      allow read: if isAuditor()
-        || (signedIn() && resource.data.agentId == request.auth.uid);
+      allow get: if resource == null
+        || (signedIn() && resource.data.agentId == request.auth.uid)
+        || isAuditor();
+      allow list: if (signedIn() && resource.data.agentId == request.auth.uid)
+        || isAuditor();
 
-      // Attempts are created only for the authenticated agent.  Score fields
-      // cannot be supplied by an agent at creation time — checked at the
-      // top level AND inside each answers[] entry, since a client could
-      // otherwise seed marks/scoreHistory/knowledgeGapCategory on an
-      // individual answer where the top-level key check can't see it.
+      // Attempts are created only for the authenticated agent. Score fields
+      // cannot be supplied by an agent at creation time.
       allow create: if signedIn()
         && request.resource.data.agentId == request.auth.uid
         && request.resource.data.status == "in_progress"
+        && request.resource.data.answers is list
         && !request.resource.data.keys().hasAny([
           "marks", "totalMarks", "reviewedBy", "reviewedAt", "scoreHistory"
-        ])
-        && !request.resource.data.answers.exists(a,
-          ('marks' in a) || ('scoreHistory' in a) || ('knowledgeGapCategory' in a)
-        );
+        ]);
 
       // Agent drafts are stored in a separate map. This avoids allowing an
       // agent to replace the auditor-owned answers array, which contains marks

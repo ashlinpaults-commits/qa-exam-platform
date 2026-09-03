@@ -17,7 +17,9 @@ import type {
   AttemptAnswer,
   Exam,
   KnowledgeGapCategory,
+  Question,
 } from "@/types";
+import { stripUndefined } from "./questions";
 
 const COL = "attempts";
 
@@ -120,6 +122,7 @@ export async function startAttempt(
   /*
    * First load the agent's existing attempts for this exam.
    */
+  console.debug(`[startAttempt] examId=${exam.id} agentId=${agentId}`);
   const prior = await fetchAttemptsForAgent(
     agentId,
     exam.id
@@ -142,6 +145,7 @@ export async function startAttempt(
     )[0];
 
   if (existingActive) {
+    console.debug(`[startAttempt] Resuming active attemptId=${existingActive.id} attemptNumber=${existingActive.attemptNumber}`);
     return existingActive.id;
   }
 
@@ -165,10 +169,28 @@ export async function startAttempt(
 
   /*
    * -------------------------------------------------------
+   * REATTEMPT PERMISSION CHECK
+   * -------------------------------------------------------
+   */
+  const permission = exam.reattemptPermissions?.[agentId];
+  const sortedPrior = [...prior].sort(
+    (a, b) => (b.attemptNumber || 0) - (a.attemptNumber || 0) || (b.startedAt || 0) - (a.startedAt || 0)
+  );
+  const latestAttempt = sortedPrior[0];
+  const latestReviewed = sortedPrior.find((attempt) => attempt.status === "reviewed");
+
+  const hasActiveReattemptPermission = Boolean(
+    permission &&
+    (!latestAttempt || permission.grantedAt > latestAttempt.startedAt)
+  );
+
+  /*
+   * -------------------------------------------------------
    * NORMAL EXAM
    * -------------------------------------------------------
    *
-   * Normal exams cannot be repeated after review.
+   * Normal exams cannot be repeated after review unless an auditor
+   * explicitly granted reattempt authorization.
    */
 
   if (
@@ -178,9 +200,11 @@ export async function startAttempt(
         attempt.status === "reviewed"
     )
   ) {
-    throw new Error(
-      "This exam has already been completed."
-    );
+    if (!hasActiveReattemptPermission) {
+      throw new Error(
+        "This exam has already been completed."
+      );
+    }
   }
 
   /*
@@ -190,26 +214,16 @@ export async function startAttempt(
    */
 
   if (exam.mode === "until_perfect") {
-    const latestReviewed = prior
-      .filter(
-        (attempt) =>
-          attempt.status === "reviewed"
-      )
-      .sort(
-        (a, b) =>
-          b.attemptNumber -
-          a.attemptNumber
-      )[0];
-
     /*
      * If the latest reviewed attempt is perfect,
-     * the exam is finished.
+     * the exam is finished unless auditor explicitly reassigned.
      */
     if (
       latestReviewed &&
       latestReviewed.maxTotalMarks &&
       latestReviewed.totalMarks ===
-        latestReviewed.maxTotalMarks
+        latestReviewed.maxTotalMarks &&
+      !hasActiveReattemptPermission
     ) {
       throw new Error(
         "You have already achieved a perfect score on this exam."
@@ -244,23 +258,42 @@ export async function startAttempt(
    * agent was actually asked, forever, regardless of future edits.
    */
 
-  const orderedQuestionRefs = [
+  let targetQuestionRefs = [
     ...exam.questions,
   ].sort(
     (a, b) =>
       a.order - b.order
   );
 
+  // If this is an authorized reattempt with specific question scoping:
+  if (
+    attemptNumber > 1 &&
+    hasActiveReattemptPermission &&
+    permission?.questionIds &&
+    permission.questionIds.length > 0
+  ) {
+    const allowedQIdSet = new Set(permission.questionIds);
+    const filtered = targetQuestionRefs.filter((q) => allowedQIdSet.has(q.questionId));
+    if (filtered.length > 0) {
+      targetQuestionRefs = filtered;
+    }
+  }
+
   // Agents cannot read the question bank (it contains answer keys). The
   // auditor publishes a redacted snapshot on the exam instead.
-  const answers: AttemptAnswer[] = orderedQuestionRefs.map((question) => ({
-    questionId: question.questionId,
-    agentAnswer: "",
-    maxMarks: 10,
-    ...(exam.questionSnapshots?.[question.questionId]
-      ? { questionSnapshot: exam.questionSnapshots[question.questionId] }
-      : {}),
-  }));
+  // Reattempts carry forward frozen snapshots from exam or prior attempt.
+  const answers: AttemptAnswer[] = targetQuestionRefs.map((question) => {
+    const questionSnapshot =
+      exam.questionSnapshots?.[question.questionId] ||
+      latestReviewed?.answers.find((a) => a.questionId === question.questionId)?.questionSnapshot;
+
+    return {
+      questionId: question.questionId,
+      agentAnswer: "",
+      maxMarks: 10,
+      ...(questionSnapshot ? { questionSnapshot } : {}),
+    };
+  });
 
   /*
    * -------------------------------------------------------
@@ -293,6 +326,8 @@ export async function startAttempt(
    * -------------------------------------------------------
    */
 
+  console.debug(`[startAttempt] Attempting atomic creation attemptId=${attemptId} attemptNumber=${attemptNumber}`);
+
   await runTransaction(
     db,
     async (transaction) => {
@@ -308,22 +343,41 @@ export async function startAttempt(
        * Do NOT create another.
        */
       if (existing.exists()) {
+        console.debug(`[startAttempt] Found concurrently created attemptId=${attemptId}`);
         return;
+      }
+
+      const payload: Record<string, unknown> = {
+        examId: exam.id,
+        agentId,
+        attemptNumber,
+        answers,
+        agentAnswers: {},
+        startedAt: Date.now(),
+        status: "in_progress",
+        analyticsFinalized: false,
+      };
+
+      if (attemptNumber > 1) {
+        payload.isReattempt = true;
+        if (latestReviewed) {
+          payload.parentAttemptId = latestReviewed.id;
+        }
+        if (permission?.mode) {
+          payload.reattemptSource =
+            permission.mode === "wrong_answers"
+              ? "wrong_answers"
+              : permission.mode === "select_questions"
+              ? "manual_selection"
+              : "same_questions";
+        }
       }
 
       transaction.set(
         attemptRef,
-        {
-          examId: exam.id,
-          agentId,
-          attemptNumber,
-          answers,
-          agentAnswers: {},
-          startedAt: Date.now(),
-          status: "in_progress",
-          analyticsFinalized: false,
-        }
+        payload
       );
+      console.debug(`[startAttempt] Created attempt payload written for attemptId=${attemptId}`);
     }
   );
 
@@ -350,6 +404,13 @@ export async function saveAnswer(
     if (!snap.exists()) throw new Error("Attempt not found.");
     const current = snap.data() as ExamAttempt;
     if (current.status !== "in_progress") throw new Error("This attempt is no longer editable.");
+
+    // Avoid unnecessary document writes if the answer hasn't changed
+    if (current.agentAnswers?.[questionId] === agentAnswer) {
+      updated = (current.answers ?? allAnswers);
+      return;
+    }
+
     const agentAnswers = {
       ...(current.agentAnswers ?? {}),
       [questionId]: agentAnswer,
@@ -358,6 +419,7 @@ export async function saveAnswer(
       answer.questionId === questionId ? { ...answer, agentAnswer } : answer
     );
     transaction.update(attemptRef, { agentAnswers });
+    console.debug(`[saveAnswer] Saved answer for attemptId=${attemptId} questionId=${questionId}`);
   });
   return updated;
 }
@@ -376,6 +438,7 @@ export async function submitAttempt(
   attemptId: string,
   startedAt: number
 ) {
+  console.debug(`[submitAttempt] Submitting attemptId=${attemptId}`);
   const attemptRef = doc(
     db,
     COL,
@@ -935,5 +998,207 @@ export async function finalizeReview(
     );
   }
 
-  return finalized;
+    return finalized;
+  }
+
+/* =========================================================
+   AMEND SCORECARD
+   ========================================================= */
+
+export interface QuestionAmendmentInput {
+  questionId: string;
+  marks: number;
+  comments?: string;
+  knowledgeGapCategory?: KnowledgeGapCategory;
+}
+
+/**
+ * Dedicated Amend Scorecard workflow for finalized reviews.
+ *
+ * Requirements:
+ * - Uses a transaction reading fresh server state.
+ * - Requires an explicit amendment reason.
+ * - Modifies only explicitly amended grading fields.
+ * - Recalculates totalMarks and maxTotalMarks.
+ * - Appends to each amended question's scoreHistory with auditor ID, reason, and timestamp.
+ * - Preserves attempt identity (id, examId, agentId, attemptNumber, startedAt).
+ * - Preserves snapshots, agentAnswers, and original review timing.
+ * - Protects question analytics from being double-counted.
+ */
+export async function amendScorecard(
+  attemptId: string,
+  amendments: QuestionAmendmentInput[],
+  amendedBy: string,
+  reason: string
+): Promise<ExamAttempt> {
+  const trimmedReason = reason.trim();
+  if (!trimmedReason) {
+    throw new Error("An explicit reason is required to amend a finalized scorecard.");
+  }
+
+  const attemptRef = doc(db, COL, attemptId);
+
+  return runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(attemptRef);
+    if (!snap.exists()) {
+      throw new Error("Attempt not found.");
+    }
+
+    const current = normalizeAgentAnswers({
+      id: snap.id,
+      ...snap.data(),
+    } as ExamAttempt);
+
+    if (current.status !== "reviewed" && current.status !== "submitted" && current.status !== "review_in_progress") {
+      throw new Error("Only submitted or finalized attempts can be amended.");
+    }
+
+    const amendmentMap = new Map(amendments.map((a) => [a.questionId, a]));
+    const now = Date.now();
+
+    // Map answers and apply amendments
+    const updatedAnswers: AttemptAnswer[] = current.answers.map((answer) => {
+      const amendment = amendmentMap.get(answer.questionId);
+      if (!amendment) {
+        return stripUndefined(answer);
+      }
+
+      const { marks, comments, knowledgeGapCategory } = amendment;
+      if (marks < 0) {
+        throw new Error("Marks cannot be below zero.");
+      }
+      if (marks > answer.maxMarks) {
+        throw new Error(`Marks for question cannot exceed ${answer.maxMarks}.`);
+      }
+
+      const isChanged = answer.marks !== marks || (comments !== undefined && comments !== (answer.comments || ""));
+      const history = answer.scoreHistory ?? [];
+
+      const updatedAnswer: Record<string, any> = {
+        ...answer,
+        marks,
+        comments: comments !== undefined ? comments : (answer.comments || ""),
+        scoreHistory: isChanged
+          ? [
+              ...history,
+              {
+                marks,
+                changedBy: amendedBy || "auditor",
+                reason: trimmedReason,
+                timestamp: now,
+              },
+            ]
+          : history,
+      };
+
+      if (marks < answer.maxMarks && knowledgeGapCategory) {
+        updatedAnswer.knowledgeGapCategory = knowledgeGapCategory;
+      } else {
+        delete updatedAnswer.knowledgeGapCategory;
+      }
+
+      const clean = stripUndefined(updatedAnswer);
+      if (clean.questionSnapshot) {
+        clean.questionSnapshot = stripUndefined(clean.questionSnapshot);
+      }
+      return clean as AttemptAnswer;
+    });
+
+    // Recalculate totals
+    const totalMarks = updatedAnswers.reduce((sum, a) => sum + (a.marks ?? 0), 0);
+    const maxTotalMarks = updatedAnswers.reduce((sum, a) => sum + a.maxMarks, 0);
+
+    // Only update keys permitted by firestore.rules for auditor update
+    const updatePayload = stripUndefined({
+      answers: updatedAnswers,
+      totalMarks,
+      maxTotalMarks,
+    });
+
+    console.debug("[amendScorecard] Committing amendment:", { attemptId, totalMarks, maxTotalMarks, amendedBy });
+    transaction.update(attemptRef, updatePayload);
+
+    return {
+      ...current,
+      ...updatePayload,
+    };
+  });
+}
+
+/* =========================================================
+   MERGE SCORECARDS (ORIGINAL + REATTEMPTS)
+   ========================================================= */
+
+export interface MergedAnswerRecord {
+  questionId: string;
+  questionSnapshot?: Question;
+  agentAnswer: string;
+  marks?: number;
+  maxMarks: number;
+  comments?: string;
+  sourceAttemptNumber: number;
+}
+
+export interface MergedScorecard {
+  examId: string;
+  agentId: string;
+  totalMarks: number;
+  maxTotalMarks: number;
+  percentage: number;
+  attemptsCount: number;
+  latestAttemptNumber: number;
+  mergedAnswers: MergedAnswerRecord[];
+}
+
+/**
+ * Computes a unified scorecard for an agent across all historical attempts for an exam.
+ * Reattempt answers override earlier scores for the reattempted questions, while questions
+ * passed in earlier attempts are preserved at their historical marks.
+ */
+export function computeMergedScorecard(
+  exam: Exam,
+  attempts: ExamAttempt[]
+): MergedScorecard | null {
+  const reviewedAttempts = attempts
+    .filter((a) => a.status === "reviewed")
+    .sort((a, b) => a.attemptNumber - b.attemptNumber);
+
+  if (reviewedAttempts.length === 0) {
+    return null;
+  }
+
+  const answerMap = new Map<string, MergedAnswerRecord>();
+
+  // Iterate chronologically so later attempts update the question's final grade
+  for (const attempt of reviewedAttempts) {
+    for (const ans of attempt.answers) {
+      if (ans.marks !== undefined) {
+        answerMap.set(ans.questionId, {
+          questionId: ans.questionId,
+          questionSnapshot: ans.questionSnapshot || exam.questionSnapshots?.[ans.questionId],
+          agentAnswer: ans.agentAnswer,
+          marks: ans.marks,
+          maxMarks: ans.maxMarks,
+          comments: ans.comments,
+          sourceAttemptNumber: attempt.attemptNumber,
+        });
+      }
+    }
+  }
+
+  const mergedAnswers = Array.from(answerMap.values());
+  const totalMarks = mergedAnswers.reduce((sum, a) => sum + (a.marks ?? 0), 0);
+  const maxTotalMarks = mergedAnswers.reduce((sum, a) => sum + a.maxMarks, 0);
+  const percentage = maxTotalMarks > 0 ? Math.round((totalMarks / maxTotalMarks) * 100) : 0;
+
+  return {
+    examId: exam.id,
+    agentId: reviewedAttempts[0].agentId,
+    totalMarks,
+    maxTotalMarks,
+    percentage,
+    attemptsCount: reviewedAttempts.length,
+    latestAttemptNumber: reviewedAttempts[reviewedAttempts.length - 1].attemptNumber,
+    mergedAnswers,
+  };
 }

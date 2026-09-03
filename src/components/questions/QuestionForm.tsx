@@ -4,6 +4,9 @@ import { useState } from "react";
 import type { Question, QuestionType, Difficulty } from "@/types";
 import { createQuestion, updateQuestion } from "@/lib/questions";
 import { useAuth } from "@/context/AuthContext";
+import { QuestionContent } from "./QuestionContent";
+import { WordQuestionEditorModal } from "./WordQuestionEditorModal";
+import { Edit3 } from "lucide-react";
 
 function friendlyError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -42,6 +45,7 @@ export function QuestionForm({
   const [imageUrl, setImageUrl] = useState(existing?.imageUrl ?? "");
   const [caseStudyContext, setCaseStudyContext] = useState(existing?.caseStudyContext ?? "");
   const [orderItems, setOrderItems] = useState<string[]>(existing?.orderItems ?? ["", ""]);
+  const [isFormattingOpen, setIsFormattingOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -112,9 +116,49 @@ export function QuestionForm({
       </div>
 
       <div>
-        <label className="mb-1 block text-sm font-medium">Question</label>
-        <textarea className="input min-h-[100px]" value={questionText} onChange={(e) => setQuestionText(e.target.value)} required />
+        <div className="mb-1 flex items-center justify-between">
+          <label className="block text-sm font-medium">Question Text</label>
+          <button
+            type="button"
+            onClick={() => setIsFormattingOpen(true)}
+            className="flex items-center gap-1 rounded bg-brand-50 px-2 py-0.5 text-xs font-semibold text-brand-700 hover:bg-brand-100 dark:bg-brand-950/40 dark:text-brand-300 dark:hover:bg-brand-900/60"
+            title="Open Word-like formatting editor"
+          >
+            <Edit3 className="h-3 w-3" />
+            <span>Format in Word Editor</span>
+          </button>
+        </div>
+        <textarea
+          className="input min-h-[100px] font-mono text-xs leading-relaxed"
+          value={questionText}
+          onChange={(e) => setQuestionText(e.target.value)}
+          required
+          placeholder="Enter question text or use Word formatting tools..."
+        />
+        {questionText.trim() && (
+          <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3 dark:border-slate-700 dark:bg-slate-900/40">
+            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+              Agent Live Preview
+            </p>
+            <QuestionContent content={questionText} className="text-sm" />
+          </div>
+        )}
       </div>
+
+      {isFormattingOpen && (
+        <WordQuestionEditorModal
+          open={isFormattingOpen}
+          onClose={() => setIsFormattingOpen(false)}
+          question={{
+            id: existing?.id ?? "preview",
+            module: module || "General",
+            difficulty,
+            type,
+            questionText,
+          }}
+          onSave={(newText) => setQuestionText(newText)}
+        />
+      )}
 
       {type === "case_study" && (
         <div>

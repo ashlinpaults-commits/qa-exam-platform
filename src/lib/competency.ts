@@ -1557,12 +1557,12 @@ export function calculateTeamCoachingIntelligence(
     of assessedCompetencies
   ) {
     for (
-      const module
+      const mod
       of competency.moduleCompetency
     ) {
       const current =
         moduleMap.get(
-          module.module
+          mod.module
         ) ?? {
           totalScore: 0,
           agentsMeasured: 0,
@@ -1570,13 +1570,13 @@ export function calculateTeamCoachingIntelligence(
         };
 
       current.totalScore +=
-        module.score;
+        mod.score;
 
       current.agentsMeasured +=
         1;
 
       if (
-        module.score <
+        mod.score <
         COACHING_THRESHOLDS.competencyThreshold
       ) {
         current.agentsBelowTarget +=
@@ -1584,7 +1584,7 @@ export function calculateTeamCoachingIntelligence(
       }
 
       moduleMap.set(
-        module.module,
+        mod.module,
         current
       );
     }
@@ -1656,24 +1656,24 @@ export function calculateTeamCoachingIntelligence(
    */
 
   for (
-    const module
+    const modRisk
     of moduleRisks
   ) {
     if (
-      module.agentsBelowTarget < 2
+      modRisk.agentsBelowTarget < 2
     ) {
       continue;
     }
 
     const severity:
       TeamCoachingInsightSeverity =
-      module.belowTargetPct >= 50
+      modRisk.belowTargetPct >= 50
         ? "high"
         : "medium";
 
     insights.push({
       id:
-        `module-risk-${module.module}`,
+        `module-risk-${modRisk.module}`,
 
       type:
         "module_risk",
@@ -1681,16 +1681,16 @@ export function calculateTeamCoachingIntelligence(
       severity,
 
       title:
-        `${module.module} requires attention`,
+        `${modRisk.module} requires attention`,
 
       description:
-        `${module.agentsBelowTarget} of ${module.agentsMeasured} assessed agents are currently below the ${COACHING_THRESHOLDS.competencyThreshold}% competency target in ${module.module}.`,
+        `${modRisk.agentsBelowTarget} of ${modRisk.agentsMeasured} assessed agents are currently below the ${COACHING_THRESHOLDS.competencyThreshold}% competency target in ${modRisk.module}.`,
 
       affectedAgents:
-        module.agentsBelowTarget,
+        modRisk.agentsBelowTarget,
 
       module:
-        module.module,
+        modRisk.module,
     });
   }
 

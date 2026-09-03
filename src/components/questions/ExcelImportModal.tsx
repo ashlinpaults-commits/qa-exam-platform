@@ -182,7 +182,7 @@ export function ExcelImportModal({ open, onClose, onImported }: { open: boolean;
             <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
               <div className="h-full bg-brand-600 transition-all" style={{ width: `${progressPct}%` }} />
             </div>
-            <p className="text-center text-xs text-slate-400">{progressPct}% — don't close this window</p>
+            <p className="text-center text-xs text-slate-400">{progressPct}% — don&apos;t close this window</p>
           </div>
         )}
 
@@ -207,7 +207,7 @@ export function ExcelImportModal({ open, onClose, onImported }: { open: boolean;
             {summary.failedBatches.length > 0 && (
               <div className="rounded-lg bg-red-50 p-3 text-xs dark:bg-red-900/20">
                 <p className="mb-1 font-medium">
-                  {summary.failedBatches.length} batch(es) failed after 3 retries each — re-upload the same file to retry just those rows (already-imported rows won't be duplicated).
+                  {summary.failedBatches.length} batch(es) failed after 3 retries each — re-upload the same file to retry just those rows (already-imported rows won&apos;t be duplicated).
                 </p>
                 <ul className="space-y-0.5">
                   {summary.failedBatches.map((b, i) => (

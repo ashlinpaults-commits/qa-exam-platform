@@ -5,6 +5,7 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 import type { Question, Difficulty, QuestionType } from "@/types";
+import { createQuestionFingerprint } from "./excelImport";
 
 const COL = "questions";
 
@@ -165,12 +166,42 @@ export async function deleteQuestion(id: string) {
 // Failed batches are retried up to 3 times with exponential backoff before
 // being counted as failed and moving on — a transient network blip no longer
 // kills the rest of the import.
-function stripUndefined<T extends Record<string, unknown>>(obj: T): T {
-  const clean: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (v !== undefined) clean[k] = v;
+// Recursive undefined-value sanitizer. Firestore throws when attempting to write
+// `undefined` values anywhere in a document tree.
+export function stripUndefined<T>(obj: T): T {
+  if (obj === null || obj === undefined) {
+    return obj;
   }
-  return clean as T;
+  if (Array.isArray(obj)) {
+    return obj.map(stripUndefined) as unknown as T;
+  }
+  if (typeof obj === "object" && !(obj instanceof Date)) {
+    const clean: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      if (v !== undefined) {
+        clean[k] = stripUndefined(v);
+      }
+    }
+    return clean as T;
+  }
+  return obj;
+}
+
+// Produces a sanitized, immutable question snapshot with answer keys and
+// confidential auditor grading data strictly redacted.
+export function createRedactedQuestionSnapshot(q: Question): Question {
+  const {
+    correctOptionIndex: _droppedIndex,
+    expectedAnswer: _droppedExpected,
+    orderItems: _droppedOrder,
+    ...rest
+  } = q;
+
+  return stripUndefined({
+    ...rest,
+    expectedAnswer: "",
+    stats: rest.stats || { timesAsked: 0, avgMarks: 0, correctPct: 0, incorrectPct: 0 },
+  });
 }
 
 async function commitWithRetry(batch: ReturnType<typeof writeBatch>, maxRetries = 3): Promise<{ ok: boolean; error?: string }> {
@@ -195,71 +226,86 @@ export interface BulkImportSummary {
   failed: number;
   duplicatesSkipped: number;
   failedBatches: { startIndex: number; count: number; error: string }[];
+  createdQuestions: Question[];
 }
 
-// Firestore has no server-side "insert if not exists" for batched writes, so
-// cross-run duplicate protection works by pre-loading every sourceId already
-// stored for the modules in this import, then skipping any row that matches.
-// Scoped to just the affected modules (not the whole collection) to keep this
-// cheap even once the bank has 10k+ questions.
-async function loadExistingSourceIds(modules: string[]): Promise<Set<string>> {
-  const existing = new Set<string>();
+// Cross-run duplicate protection works by pre-loading existing content fingerprints
+// for the modules in this import, then skipping any row that matches substantive content.
+async function loadExistingQuestionSignatures(modules: string[]): Promise<{
+  fingerprints: Set<string>;
+  sourceIds: Set<string>;
+}> {
+  const fingerprints = new Set<string>();
+  const sourceIds = new Set<string>();
   const uniqueModules = Array.from(new Set(modules));
-  // Firestore "in" queries cap at 30 values — chunk defensively even though
-  // real question banks rarely exceed a handful of modules.
+
   for (let i = 0; i < uniqueModules.length; i += 30) {
     const group = uniqueModules.slice(i, i + 30);
     const snap = await getDocs(query(collection(db, COL), where("module", "in", group)));
     snap.docs.forEach((d) => {
-      const sourceId = (d.data() as Question).sourceId;
-      if (sourceId) existing.add(sourceId);
+      const data = d.data() as Question;
+      if (data.sourceId) sourceIds.add(data.sourceId);
+      const fp = data.fingerprint || createQuestionFingerprint(data.questionText, data.expectedAnswer, data.module);
+      if (fp) fingerprints.add(fp);
     });
   }
-  return existing;
+  return { fingerprints, sourceIds };
 }
 
 export async function bulkCreateQuestions(
-  rows: Omit<Question, "id" | "createdAt" | "updatedAt" | "version" | "stats">[],
+  rows: Omit<Question, "id" | "createdAt" | "updatedAt" | "version" | "stats" | "createdBy">[],
   createdBy: string,
   onProgress?: (imported: number, total: number) => void,
   batchSize = 200
 ): Promise<BulkImportSummary> {
-  const summary: BulkImportSummary = { imported: 0, failed: 0, duplicatesSkipped: 0, failedBatches: [] };
+  const summary: BulkImportSummary = {
+    imported: 0,
+    failed: 0,
+    duplicatesSkipped: 0,
+    failedBatches: [],
+    createdQuestions: [],
+  };
 
-  const existingSourceIds = await loadExistingSourceIds(rows.map((r) => r.module));
+  const { fingerprints: existingFingerprints } = await loadExistingQuestionSignatures(rows.map((r) => r.module));
 
-  // Rows without a sourceId (blank Question No.) can't be deduped against
-  // Firestore, so they always upload — only sourceId-bearing rows get skipped.
+  // Deduplicate against existing substantive content fingerprints, NOT solely Question No.
   const toUpload = rows.filter((r) => {
-    if (r.sourceId && existingSourceIds.has(r.sourceId)) {
+    const fp = r.fingerprint || createQuestionFingerprint(r.questionText, r.expectedAnswer, r.module);
+    if (existingFingerprints.has(fp)) {
       summary.duplicatesSkipped++;
       return false;
     }
-    if (r.sourceId) existingSourceIds.add(r.sourceId); // catch dupes within this same run too
+    existingFingerprints.add(fp);
     return true;
   });
 
   for (let i = 0; i < toUpload.length; i += batchSize) {
     const chunk = toUpload.slice(i, i + batchSize);
     const batch = writeBatch(db);
+    const batchQuestions: Question[] = [];
+
     chunk.forEach((row) => {
       const ref = doc(collection(db, COL));
-      batch.set(
-        ref,
-        stripUndefined({
-          ...row,
-          createdBy,
-          version: 1,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          stats: { timesAsked: 0, avgMarks: 0, correctPct: 0, incorrectPct: 0 },
-        })
-      );
+      const fp = row.fingerprint || createQuestionFingerprint(row.questionText, row.expectedAnswer, row.module);
+      const now = Date.now();
+      const questionDoc: Omit<Question, "id"> = {
+        ...row,
+        fingerprint: fp,
+        createdBy,
+        version: 1,
+        createdAt: now,
+        updatedAt: now,
+        stats: { timesAsked: 0, avgMarks: 0, correctPct: 0, incorrectPct: 0 },
+      };
+      const cleaned = stripUndefined(questionDoc);
+      batch.set(ref, cleaned);
+      batchQuestions.push({ id: ref.id, ...cleaned } as Question);
     });
 
     const result = await commitWithRetry(batch);
     if (result.ok) {
       summary.imported += chunk.length;
+      summary.createdQuestions.push(...batchQuestions);
     } else {
       summary.failed += chunk.length;
       summary.failedBatches.push({ startIndex: i, count: chunk.length, error: result.error ?? "Unknown error" });

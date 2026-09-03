@@ -717,7 +717,7 @@ const coachingCounts = useMemo(
 
                   <div className="h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                     <div
-                      className="h-full rounded-full bg-indigo-500 transition-all"
+                      className="h-full rounded-full bg-brand-500 transition-all"
                       style={{
                         width: `${Math.min(
                           100,
@@ -1211,7 +1211,7 @@ function CompetencyCell({
 
       <div className="h-1.5 w-16 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
         <div
-          className="h-full rounded-full bg-indigo-500"
+          className="h-full rounded-full bg-brand-500"
           style={{
             width: `${Math.min(
               100,

@@ -7,6 +7,7 @@ import { startAttempt, saveAnswer, submitAttempt, getAttempt } from "@/lib/attem
 import { useAuth } from "@/context/AuthContext";
 import type { Exam, Question, ExamAttempt } from "@/types";
 import { AnswerInput } from "@/components/questions/AnswerInput";
+import { QuestionContent } from "@/components/questions/QuestionContent";
 import { Loader2, ChevronLeft, ChevronRight, Check } from "lucide-react";
 
 // Debounce autosave so we don't write to Firestore on every keystroke.
@@ -32,46 +33,68 @@ export function TakeExam({ examId }: { examId: string }) {
   const [submitting, setSubmitting] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [error, setError] = useState("");
+  const lastSavedAnswerRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
-    if (!profile) return;
+    if (!profile?.uid) return;
+    let cancelled = false;
+
     (async () => {
       try {
+        console.debug("[TakeExam] Loading exam", { examId, agentId: profile.uid });
         const e = await getExam(examId);
+        if (cancelled) return;
         if (!e) throw new Error("This exam is no longer available.");
         setExam(e);
 
         const attemptId = await startAttempt(e, profile.uid);
+        if (cancelled) return;
         const a = await getAttempt(attemptId);
+        if (cancelled) return;
         setAttempt(a);
 
         if (a) {
-        // Each answer carries a snapshot of the question exactly as it
-        // was when this attempt started — use that instead of a live
-        // Question Bank fetch, so an auditor editing a question mid-exam
-        // can't change what the agent is currently looking at. Older
-        // attempts created before snapshots existed fall back to a live
-        // fetch so they keep working.
-        const qs = a.answers
-          .map((ans) => ans.questionSnapshot ?? e.questionSnapshots?.[ans.questionId])
-          .filter(Boolean) as Question[];
-        if (qs.length !== a.answers.length) {
-          throw new Error("This exam is missing its safe question content. Ask an auditor to republish it.");
-        }
-        setQuestions(qs);
+          console.debug("[TakeExam] Attempt loaded/started", {
+            examId,
+            attemptId: a.id,
+            attemptNumber: a.attemptNumber,
+            status: a.status,
+          });
 
-        const initial: Record<string, string> = {};
-        a.answers.forEach((ans) => (initial[ans.questionId] = ans.agentAnswer));
+          // Each answer carries a snapshot of the question exactly as it
+          // was when this attempt started — use that instead of a live
+          // Question Bank fetch, so an auditor editing a question mid-exam
+          // can't change what the agent is currently looking at. Older
+          // attempts created before snapshots existed fall back to a live
+          // fetch so they keep working.
+          const qs = a.answers
+            .map((ans) => ans.questionSnapshot ?? e.questionSnapshots?.[ans.questionId])
+            .filter(Boolean) as Question[];
+          if (qs.length !== a.answers.length) {
+            throw new Error("This exam is missing its safe question content. Ask an auditor to republish it.");
+          }
+          setQuestions(qs);
+
+          const initial: Record<string, string> = {};
+          a.answers.forEach((ans) => {
+            initial[ans.questionId] = ans.agentAnswer;
+            lastSavedAnswerRef.current[ans.questionId] = ans.agentAnswer;
+          });
           setAnswers(initial);
         }
       } catch (err) {
+        if (cancelled) return;
         console.error("Failed to load attempt", err);
         setError(err instanceof Error ? err.message : "Couldn't load this exam. Please retry.");
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
-  }, [examId, profile]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [examId, profile?.uid]);
 
   const current = questions[index];
 
@@ -80,8 +103,12 @@ export function TakeExam({ examId }: { examId: string }) {
       if (!attempt || !current) return;
       const val = answers[current.id];
       if (val === undefined) return;
+      // Skip writing if the answer has not changed from server or last save
+      if (lastSavedAnswerRef.current[current.id] === val) return;
+
       setSaveStatus("saving");
       saveAnswer(attempt.id, current.id, val, attempt.answers).then((updated) => {
+        lastSavedAnswerRef.current[current.id] = val;
         setAttempt((prev) => (prev ? { ...prev, answers: updated } : prev));
         setSaveStatus("saved");
       }).catch((err) => {
@@ -99,9 +126,10 @@ export function TakeExam({ examId }: { examId: string }) {
     setSubmitting(true);
     try {
       // The debounce may still be pending for the last field the agent typed.
-      // Flush it before changing the attempt status to submitted.
-      if (current && answers[current.id] !== undefined) {
+      // Flush it before changing the attempt status to submitted only if changed.
+      if (current && answers[current.id] !== undefined && lastSavedAnswerRef.current[current.id] !== answers[current.id]) {
         await saveAnswer(attempt.id, current.id, answers[current.id], attempt.answers);
+        lastSavedAnswerRef.current[current.id] = answers[current.id];
       }
       await submitAttempt(attempt.id, attempt.startedAt);
       router.push("/agent/dashboard");
@@ -142,10 +170,26 @@ export function TakeExam({ examId }: { examId: string }) {
       </div>
 
       <div className="card p-6">
-        <p className="mb-1 text-xs font-medium uppercase tracking-wide text-brand-600">
-          {current.module} · {current.feature}
-        </p>
-        <h2 className="mb-4 text-lg font-medium">{current.questionText}</h2>
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <p className="text-xs font-semibold uppercase tracking-wide text-brand-700 dark:text-brand-300">
+              {current.module} · {current.feature}
+            </p>
+            {attempt && attempt.attemptNumber > 1 && (
+              <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-semibold text-brand-700 dark:bg-brand-950/40 dark:text-brand-300">
+                Reattempt (Attempt {attempt.attemptNumber})
+              </span>
+            )}
+          </div>
+          <span className="text-xs font-medium text-slate-400">
+            Question {index + 1} of {questions.length}
+          </span>
+        </div>
+
+        <div className="mb-6 border-b border-slate-100 pb-5 dark:border-slate-800">
+          <QuestionContent content={current.questionText} className="text-base text-slate-900 dark:text-slate-100" />
+        </div>
+
         <AnswerInput
           question={current}
           value={answers[current.id] ?? ""}

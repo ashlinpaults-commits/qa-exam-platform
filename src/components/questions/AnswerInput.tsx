@@ -1,6 +1,7 @@
 "use client";
 
 import type { Question } from "@/types";
+import { QuestionContent } from "./QuestionContent";
 
 // Renders the correct input control for each of the 6 question types when an
 // agent is taking an exam. Always stores answer as a string (JSON-encoded for
@@ -74,11 +75,11 @@ export function AnswerInput({
       return (
         <div className="space-y-3">
           {question.caseStudyContext && (
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm dark:border-slate-700 dark:bg-slate-800">
-              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm dark:border-slate-700 dark:bg-slate-800/80">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
                 Ticket / Case Context
               </p>
-              <p className="whitespace-pre-wrap">{question.caseStudyContext}</p>
+              <QuestionContent content={question.caseStudyContext} className="text-sm text-slate-700 dark:text-slate-300" />
             </div>
           )}
           <textarea
