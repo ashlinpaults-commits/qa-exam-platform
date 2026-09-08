@@ -19,12 +19,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           href="/"
           className="flex items-center gap-2.5 font-semibold transition-opacity hover:opacity-90"
         >
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white p-1 shadow-xs ring-1 ring-slate-200/70 dark:ring-white/15">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white p-1 shadow-xs ring-1 ring-slate-200/70 dark:ring-white/15">
             <Image
               src="/logo-mark.png"
               alt="QA Exam Platform Logo"
-              width={24}
-              height={24}
+              width={32}
+              height={32}
               className="h-full w-full object-contain"
               priority
             />
