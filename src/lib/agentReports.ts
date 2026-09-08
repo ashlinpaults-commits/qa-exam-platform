@@ -511,7 +511,7 @@ export function buildAgentPerformanceReport({
 
       return {
         questionId: record.questionId,
-        questionText: q?.questionText || `Question (${record.questionId.slice(0, 8)})`,
+        questionText: q?.questionText?.trim() || "Question text unavailable",
         module: q?.module || "General",
         feature: q?.feature || "General",
         questionType: q?.type || "descriptive",

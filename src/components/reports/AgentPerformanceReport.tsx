@@ -8,22 +8,16 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowRight,
-  Download,
   CheckCircle2,
   AlertTriangle,
-  Clock,
   Target,
-  BookOpen,
-  Award,
   ChevronDown,
   ChevronUp,
-  RotateCcw,
-  Sparkles,
-  Layers,
-  HelpCircle,
   FileSpreadsheet,
+  Printer,
 } from "lucide-react";
 import { Badge, EmptyState } from "@/components/ui/Primitives";
+import { QuestionContent } from "@/components/questions/QuestionContent";
 
 interface AgentPerformanceReportProps {
   reports: AgentPerformanceReportData[];
@@ -69,6 +63,10 @@ export function AgentPerformanceReport({
     });
   }
 
+  function handlePrint() {
+    window.print();
+  }
+
   function handleExportExcel() {
     try {
       setExporting(true);
@@ -86,7 +84,11 @@ export function AgentPerformanceReport({
 
   return (
     <div className="space-y-8 pb-12">
-      {/* TOP CONTROLS & HEADER */}
+      {/* =========================================================
+         SCREEN VIEW (HIDDEN DURING BROWSER PRINT)
+         ========================================================= */}
+      <div className="print:hidden space-y-8">
+        {/* TOP CONTROLS & HEADER */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-5 dark:border-slate-800">
         <div>
           <button
@@ -100,7 +102,7 @@ export function AgentPerformanceReport({
             Agent Performance Report
           </h1>
           <p className="mt-0.5 text-sm text-slate-500">
-            Official performance & competency analytics generated on{" "}
+            Official performance &amp; competency analytics generated on{" "}
             {new Date(currentReport.generatedAt).toLocaleString(undefined, {
               dateStyle: "medium",
               timeStyle: "short",
@@ -109,6 +111,16 @@ export function AgentPerformanceReport({
         </div>
 
         <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handlePrint}
+            className="btn-secondary inline-flex items-center gap-2 text-sm shadow-sm"
+            title="Print dashboard or save as PDF"
+          >
+            <Printer className="h-4 w-4 text-slate-600 dark:text-slate-300" />
+            <span>Print / PDF</span>
+          </button>
+
           <button
             type="button"
             onClick={handleExportExcel}
@@ -240,63 +252,260 @@ export function AgentPerformanceReport({
         </section>
       )}
 
+        {/* ACTIVE AGENT DETAIL (INTERACTIVE ON SCREEN) */}
+        <AgentDetailReport
+          report={currentReport}
+          isPrint={false}
+          expandedExamIds={expandedExamIds}
+          onToggleExamExpand={toggleExamExpand}
+        />
+      </div>
+
+      {/* =========================================================
+         PRINT VIEW (FAITHFUL REPORT RENDERED ONTO PAPER / PDF)
+         ========================================================= */}
+      <div className="hidden print:block space-y-8 bg-white text-slate-900">
+        {/* FIRST-PAGE EXECUTIVE SUMMARY TABLE IF MULTIPLE AGENTS ARE SELECTED */}
+        {reports.length > 1 && (
+          <div className="print-page-break-after space-y-6">
+            <PrintTeamSummaryHeader
+              count={reports.length}
+              generatedAt={currentReport.generatedAt}
+            />
+
+            <div className="card overflow-hidden">
+              <div className="border-b border-slate-200 bg-slate-50 px-5 py-3">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-700">
+                  Selected Agents Overview ({reports.length} Agents)
+                </h3>
+              </div>
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-600">
+                  <tr>
+                    <th className="px-5 py-2.5">Agent</th>
+                    <th className="px-5 py-2.5">Overall Score</th>
+                    <th className="px-5 py-2.5">Competency</th>
+                    <th className="px-5 py-2.5">Tests (Comp/Assigned)</th>
+                    <th className="px-5 py-2.5">Attempts</th>
+                    <th className="px-5 py-2.5">Completion Rate</th>
+                    <th className="px-5 py-2.5">Trend</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {reports.map((r) => (
+                    <tr key={r.agent.uid}>
+                      <td className="px-5 py-3">
+                        <span className="font-semibold text-slate-900 block">
+                          {r.agent.name || "Agent"}
+                        </span>
+                        <span className="text-[11px] text-slate-500 font-normal">
+                          {r.agent.email || "No email on file"}
+                        </span>
+                      </td>
+                      <td className="px-5 py-3 font-bold text-slate-900">
+                        {r.summary.overallScore !== null ? `${r.summary.overallScore}%` : "No data"}
+                      </td>
+                      <td className="px-5 py-3">
+                        {r.summary.competencyScore !== null ? `${r.summary.competencyScore}%` : "N/A"}
+                      </td>
+                      <td className="px-5 py-3">
+                        {r.summary.testsCompleted} / {r.summary.totalTestsAssigned}
+                      </td>
+                      <td className="px-5 py-3">{r.summary.totalAttempts}</td>
+                      <td className="px-5 py-3">{r.summary.completionRate}%</td>
+                      <td className="px-5 py-3">
+                        <TrendBadge trend={r.trend} velocity={r.trendVelocity} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* INDIVIDUAL COMPLETE REPORTS FOR EVERY SELECTED AGENT */}
+        {reports.map((report, idx) => (
+          <div
+            key={report.agent.uid}
+            className={idx > 0 || reports.length > 1 ? "print-page-break space-y-6" : "space-y-6"}
+          >
+            <ReportPrintHeader report={report} />
+            <AgentDetailReport report={report} isPrint={true} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   PDF METADATA HEADERS
+   ========================================================= */
+
+function ReportPrintHeader({ report }: { report: AgentPerformanceReportData }) {
+  return (
+    <div className="border-b-2 border-brand-600 pb-4 mb-6 print-avoid-break">
+      <div className="flex items-start justify-between">
+        <div>
+          <span className="text-xs font-bold uppercase tracking-widest text-brand-600">
+            QA Exam Platform
+          </span>
+          <h1 className="text-2xl font-black text-slate-900 tracking-tight mt-0.5">
+            Agent Performance Report
+          </h1>
+        </div>
+        <div className="text-right text-xs text-slate-500">
+          <p className="font-semibold text-slate-700">Official Auditor Audit</p>
+          <p className="mt-0.5">
+            Generated:{" "}
+            {new Date(report.generatedAt).toLocaleString(undefined, {
+              dateStyle: "medium",
+              timeStyle: "short",
+            })}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2 rounded-lg bg-slate-50 p-3 text-xs text-slate-700 border border-slate-200">
+        <div>
+          <span className="font-semibold text-slate-500">Agent: </span>
+          <span className="font-bold text-slate-900">{report.agent.name || "Agent"}</span>
+        </div>
+        <div>
+          <span className="font-semibold text-slate-500">Email: </span>
+          <span className="font-medium text-slate-800">{report.agent.email || "No email on file"}</span>
+        </div>
+        <div>
+          <span className="font-semibold text-slate-500">Agent UID: </span>
+          <code className="text-slate-600 font-mono text-[11px]">{report.agent.uid}</code>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PrintTeamSummaryHeader({
+  count,
+  generatedAt,
+}: {
+  count: number;
+  generatedAt: number;
+}) {
+  return (
+    <div className="border-b-2 border-brand-600 pb-4 mb-6 print-avoid-break">
+      <div className="flex items-start justify-between">
+        <div>
+          <span className="text-xs font-bold uppercase tracking-widest text-brand-600">
+            QA Exam Platform
+          </span>
+          <h1 className="text-2xl font-black text-slate-900 tracking-tight mt-0.5">
+            Agent Performance Report — Team Summary
+          </h1>
+          <p className="mt-1 text-xs text-slate-500">
+            Executive comparison for {count} selected agents
+          </p>
+        </div>
+        <div className="text-right text-xs text-slate-500">
+          <p className="font-semibold text-slate-700">Official Auditor Audit</p>
+          <p className="mt-0.5">
+            Generated:{" "}
+            {new Date(generatedAt).toLocaleString(undefined, {
+              dateStyle: "medium",
+              timeStyle: "short",
+            })}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   AGENT DETAIL REPORT (SHARED BETWEEN SCREEN & PRINT)
+   ========================================================= */
+
+function AgentDetailReport({
+  report,
+  isPrint = false,
+  expandedExamIds = new Set(),
+  onToggleExamExpand,
+}: {
+  report: AgentPerformanceReportData;
+  isPrint?: boolean;
+  expandedExamIds?: Set<string>;
+  onToggleExamExpand?: (examId: string) => void;
+}) {
+  const {
+    summary,
+    examPerformances,
+    frequentlyMissedQuestions,
+    competency,
+    coaching,
+    progression,
+  } = report;
+
+  return (
+    <div className="space-y-6">
       {/* =========================================================
          SECTION 1: AGENT SUMMARY & PROMINENT HEADER
          ========================================================= */}
-      <section className="card p-6 shadow-sm">
+      <section className="card p-6 shadow-sm print-avoid-break">
         <div className="flex flex-wrap items-start justify-between gap-6 border-b border-slate-200 pb-6 dark:border-slate-800">
           <div className="flex items-center gap-4">
             <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 text-2xl font-bold text-white shadow-lg shadow-brand-500/20 uppercase">
-              {currentReport.agent.name ? currentReport.agent.name.charAt(0) : "A"}
+              {report.agent.name ? report.agent.name.charAt(0) : "A"}
             </div>
             <div>
               <div className="flex items-center gap-2.5">
-                <h2 className="text-xl font-bold text-slate-900 dark:text-white">
-                  {currentReport.agent.name || "Agent"}
+                <h2 className="text-xl font-bold text-slate-900 dark:text-white print:text-slate-900">
+                  {report.agent.name || "Agent"}
                 </h2>
                 <Badge color="brand">Active Agent</Badge>
               </div>
-              <p className="mt-0.5 text-sm text-slate-500">
-                {currentReport.agent.email || "No email on file"}
+              <p className="mt-0.5 text-sm text-slate-500 print:text-slate-600">
+                {report.agent.email || "No email on file"}
               </p>
-              <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500">
-                <span>UID: <code className="text-slate-600 dark:text-slate-400">{currentReport.agent.uid.slice(0, 10)}...</code></span>
+              <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500 print:text-slate-600">
+                <span>
+                  UID: <code className="text-slate-600 dark:text-slate-400 font-mono">{report.agent.uid.slice(0, 10)}...</code>
+                </span>
                 <span>•</span>
-                <span>Enrolled: {new Date(currentReport.agent.createdAt).toLocaleDateString()}</span>
+                <span>Enrolled: {new Date(report.agent.createdAt).toLocaleDateString()}</span>
               </div>
             </div>
           </div>
 
           {/* Overall score card */}
-          <div className="flex items-center gap-4 rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/50 to-white p-4 dark:border-brand-900/40 dark:from-brand-950/20 dark:to-slate-900 shadow-sm">
+          <div className="flex items-center gap-4 rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/50 to-white p-4 dark:border-brand-900/40 dark:from-brand-950/20 dark:to-slate-900 shadow-sm print:bg-slate-50 print:border-slate-200">
             <div className="text-right">
               <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                 Overall Agent Score
               </p>
-              <p className="mt-0.5 text-3xl font-extrabold text-brand-600 dark:text-brand-400">
+              <p className="mt-0.5 text-3xl font-extrabold text-brand-600 dark:text-brand-400 print:text-brand-700">
                 {summary.overallScore !== null ? `${summary.overallScore}%` : "—"}
               </p>
-              <p className="text-[11px] text-slate-400 max-w-[200px]">
+              <p className="text-[11px] text-slate-400 max-w-[200px] print:text-slate-500">
                 {summary.overallScore !== null
                   ? `${summary.totalMarksEarned} / ${summary.totalPossibleMarks} total marks earned`
                   : "No reviewed attempts yet"}
               </p>
             </div>
-            <div className="h-12 w-px bg-slate-200 dark:bg-slate-700" />
+            <div className="h-12 w-px bg-slate-200 dark:bg-slate-700 print:bg-slate-300" />
             <div>
-              <p className="text-xs font-medium text-slate-400">Competency</p>
-              <p className="text-lg font-bold text-slate-800 dark:text-slate-100">
+              <p className="text-xs font-medium text-slate-400 print:text-slate-500">Competency</p>
+              <p className="text-lg font-bold text-slate-800 dark:text-slate-100 print:text-slate-900">
                 {summary.competencyScore !== null ? `${summary.competencyScore}%` : "—"}
               </p>
               <div className="mt-1">
-                <TrendBadge trend={currentReport.trend} velocity={currentReport.trendVelocity} />
+                <TrendBadge trend={report.trend} velocity={report.trendVelocity} />
               </div>
             </div>
           </div>
         </div>
 
-        {/* METRICS GRID (SECTION 1 COMPLETE) */}
-        <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        {/* METRICS GRID */}
+        <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 print:grid-cols-6">
           <MetricCard
             label="Tests Assigned"
             value={String(summary.totalTestsAssigned)}
@@ -338,16 +547,16 @@ export function AgentPerformanceReport({
         </div>
 
         {/* QUESTIONS & MARKS SUMMARY ROW */}
-        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4 rounded-xl bg-slate-50/70 p-3.5 dark:bg-slate-800/30 border border-slate-100 dark:border-slate-800/60 text-xs">
+        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4 print:grid-cols-4 rounded-xl bg-slate-50/70 p-3.5 dark:bg-slate-800/30 border border-slate-100 dark:border-slate-800/60 print:border-slate-200 print:bg-slate-50 text-xs">
           <div>
             <span className="text-slate-500">Questions Attempted:</span>{" "}
-            <span className="font-semibold text-slate-800 dark:text-slate-200">
+            <span className="font-semibold text-slate-800 dark:text-slate-200 print:text-slate-900">
               {summary.totalQuestionsAttempted}
             </span>
           </div>
           <div>
             <span className="text-slate-500">Correct Answers:</span>{" "}
-            <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+            <span className="font-semibold text-emerald-600 dark:text-emerald-400 print:text-emerald-700">
               {summary.correctAnswers}{" "}
               {summary.totalQuestionsAttempted > 0
                 ? `(${Math.round((summary.correctAnswers / summary.totalQuestionsAttempted) * 100)}%)`
@@ -356,7 +565,7 @@ export function AgentPerformanceReport({
           </div>
           <div>
             <span className="text-slate-500">Incorrect Answers:</span>{" "}
-            <span className="font-semibold text-rose-600 dark:text-rose-400">
+            <span className="font-semibold text-rose-600 dark:text-rose-400 print:text-rose-700">
               {summary.incorrectAnswers}{" "}
               {summary.totalQuestionsAttempted > 0
                 ? `(${Math.round((summary.incorrectAnswers / summary.totalQuestionsAttempted) * 100)}%)`
@@ -365,7 +574,7 @@ export function AgentPerformanceReport({
           </div>
           <div>
             <span className="text-slate-500">Total Marks:</span>{" "}
-            <span className="font-semibold text-slate-800 dark:text-slate-200">
+            <span className="font-semibold text-slate-800 dark:text-slate-200 print:text-slate-900">
               {summary.totalMarksEarned} / {summary.totalPossibleMarks}
             </span>
           </div>
@@ -376,17 +585,19 @@ export function AgentPerformanceReport({
          SECTION 2 & 3: TEST / EXAM PERFORMANCE & ATTEMPT HISTORY
          ========================================================= */}
       <section className="card overflow-hidden">
-        <div className="border-b border-slate-200 px-6 py-4 dark:border-slate-800">
+        <div className="border-b border-slate-200 px-6 py-4 dark:border-slate-800 print:px-4 print:py-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <h3 className="font-semibold text-slate-900 dark:text-slate-100">
-                Assigned Tests & Exam Performance
+              <h3 className="font-semibold text-slate-900 dark:text-slate-100 print:text-slate-900">
+                Assigned Tests &amp; Exam Performance
               </h3>
-              <p className="mt-0.5 text-xs text-slate-500">
-                Individual performance across all assigned exams. Click an exam row to view its full attempt history.
+              <p className="mt-0.5 text-xs text-slate-500 print:text-slate-600">
+                {isPrint
+                  ? "Individual performance across all assigned exams including complete historical attempts."
+                  : "Individual performance across all assigned exams. Click an exam row to view its full attempt history."}
               </p>
             </div>
-            <span className="text-xs text-slate-400">
+            <span className="text-xs text-slate-400 print:text-slate-500">
               {examPerformances.length} total exam{examPerformances.length === 1 ? "" : "s"}
             </span>
           </div>
@@ -400,33 +611,34 @@ export function AgentPerformanceReport({
             />
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[950px] text-left text-sm">
-              <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wider text-slate-500 dark:border-slate-800 dark:bg-slate-800/60">
+          <div className="overflow-x-auto print:overflow-visible">
+            <table className="w-full min-w-[950px] print:min-w-full text-left text-sm print:text-xs">
+              <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wider text-slate-500 dark:border-slate-800 dark:bg-slate-800/60 print:bg-slate-100 print:text-slate-700">
                 <tr>
-                  <th className="px-6 py-3">Exam Name</th>
-                  <th className="px-4 py-3">Mode</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">Attempts</th>
-                  <th className="px-4 py-3">Latest Score</th>
-                  <th className="px-4 py-3">Best Score</th>
-                  <th className="px-4 py-3">Avg. Score</th>
-                  <th className="px-4 py-3">Marks</th>
-                  <th className="px-4 py-3">Time</th>
-                  <th className="px-4 py-3">Review</th>
-                  <th className="px-4 py-3">Completion</th>
-                  <th className="px-4 py-3 text-center">History</th>
+                  <th className="px-6 py-3 print:px-3 print:py-2">Exam Name</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Mode</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Status</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Attempts</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Latest Score</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Best Score</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Avg. Score</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Marks</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Time</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Review</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Completion</th>
+                  {!isPrint && <th className="px-4 py-3 text-center print:hidden">History</th>}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800 print:divide-slate-200">
                 {examPerformances.map((perf) => {
-                  const isExpanded = expandedExamIds.has(perf.examId);
+                  const isExpanded = isPrint ? true : expandedExamIds.has(perf.examId);
                   return (
                     <ExamPerformanceRows
                       key={perf.examId}
                       perf={perf}
                       isExpanded={isExpanded}
-                      onToggle={() => toggleExamExpand(perf.examId)}
+                      isPrint={isPrint}
+                      onToggle={onToggleExamExpand ? () => onToggleExamExpand(perf.examId) : undefined}
                     />
                   );
                 })}
@@ -440,14 +652,14 @@ export function AgentPerformanceReport({
          SECTION 5: FREQUENTLY MISSED QUESTIONS (AGENT-SPECIFIC)
          ========================================================= */}
       <section className="card overflow-hidden">
-        <div className="border-b border-slate-200 px-6 py-4 dark:border-slate-800">
+        <div className="border-b border-slate-200 px-6 py-4 dark:border-slate-800 print:px-4 print:py-3">
           <div className="flex items-center gap-2">
             <Target className="h-5 w-5 text-rose-500" />
             <div>
-              <h3 className="font-semibold text-slate-900 dark:text-slate-100">
+              <h3 className="font-semibold text-slate-900 dark:text-slate-100 print:text-slate-900">
                 Frequently Missed Questions (Agent-Specific)
               </h3>
-              <p className="mt-0.5 text-xs text-slate-500">
+              <p className="mt-0.5 text-xs text-slate-500 print:text-slate-600">
                 Identifies questions this specific agent repeatedly answered incorrectly across eligible reviewed attempts.
               </p>
             </div>
@@ -462,76 +674,93 @@ export function AgentPerformanceReport({
             />
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[850px] text-left text-sm">
-              <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wider text-slate-500 dark:border-slate-800 dark:bg-slate-800/60">
+          <div className="overflow-x-auto print:overflow-visible">
+            <table className="w-full min-w-[850px] print:min-w-full text-left text-sm print:text-xs">
+              <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wider text-slate-500 dark:border-slate-800 dark:bg-slate-800/60 print:bg-slate-100 print:text-slate-700">
                 <tr>
-                  <th className="px-6 py-3">Question</th>
-                  <th className="px-4 py-3">Module</th>
-                  <th className="px-4 py-3">Feature</th>
-                  <th className="px-4 py-3">Type</th>
-                  <th className="px-4 py-3">Attempts</th>
-                  <th className="px-4 py-3">Times Incorrect</th>
-                  <th className="px-4 py-3">Incorrect Rate</th>
-                  <th className="px-4 py-3">Latest Result</th>
-                  <th className="px-4 py-3">Latest Score</th>
+                  <th className="px-6 py-3 print:px-3 print:py-2">Question</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Module</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Feature</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Type</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2 text-center">Attempts</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2 text-center">Incorrect</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Rate</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Latest Result</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Latest Score</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800 print:divide-slate-200">
                 {frequentlyMissedQuestions.map((q, i) => (
-                  <tr key={`${q.questionId}-${i}`} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
-                    <td className="px-6 py-3.5 max-w-md">
-                      <p className="font-medium text-slate-900 dark:text-slate-100 line-clamp-2">
-                        {q.questionText}
-                      </p>
+                  <tr key={`${q.questionId}-${i}`} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40 print:hover:bg-transparent">
+                    <td className="px-6 py-3.5 print:px-3 print:py-2.5 max-w-md print:max-w-none">
+                      {q.questionText === "Question text unavailable" ? (
+                        <div>
+                          <p className="text-sm font-semibold text-rose-600 dark:text-rose-400 print:text-rose-700">
+                            Question text unavailable
+                          </p>
+                          <span className="text-[10px] font-mono text-slate-400 block mt-0.5">
+                            ID: {q.questionId}
+                          </span>
+                        </div>
+                      ) : (
+                        <div>
+                          <QuestionContent
+                            content={q.questionText}
+                            className="text-sm font-medium text-slate-900 dark:text-slate-100 print:text-slate-900 print:text-xs leading-snug"
+                          />
+                          <span className="text-[10px] font-mono text-slate-400 block mt-1">
+                            ID: {q.questionId}
+                          </span>
+                        </div>
+                      )}
                       {q.knowledgeGapCategory && (
-                        <span className="mt-1 inline-block text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                        <span className="mt-1 inline-block text-[11px] font-medium text-amber-600 dark:text-amber-400 print:text-amber-700">
                           Gap: {q.knowledgeGapCategory}
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3.5 whitespace-nowrap text-slate-600 dark:text-slate-300">
+                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap text-slate-600 dark:text-slate-300 print:text-slate-800">
                       {q.module}
                     </td>
-                    <td className="px-4 py-3.5 whitespace-nowrap text-slate-500 text-xs">
+                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap text-slate-500 text-xs">
                       {q.feature}
                     </td>
-                    <td className="px-4 py-3.5 whitespace-nowrap">
+                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap">
                       <span className="capitalize text-xs text-slate-500">
                         {q.questionType.replace(/_/g, " ")}
                       </span>
                     </td>
-                    <td className="px-4 py-3.5 text-center font-medium">
+                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 text-center font-medium">
                       {q.timesAttempted}
                     </td>
-                    <td className="px-4 py-3.5 text-center font-bold text-rose-600 dark:text-rose-400">
+                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 text-center font-bold text-rose-600 dark:text-rose-400 print:text-rose-700">
                       {q.timesIncorrect} / {q.timesAttempted}
                     </td>
-                    <td className="px-4 py-3.5">
+                    <td className="px-4 py-3.5 print:px-2 print:py-2.5">
                       <div className="flex items-center gap-2">
-                        <div className="h-1.5 w-14 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                        <div className="h-1.5 w-14 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800 print:bg-slate-200">
                           <div
                             className="h-full rounded-full bg-rose-500"
                             style={{ width: `${q.incorrectPct}%` }}
                           />
                         </div>
-                        <span className="text-xs font-semibold text-rose-600 dark:text-rose-400">
+                        <span className="text-xs font-semibold text-rose-600 dark:text-rose-400 print:text-rose-700">
                           {q.incorrectPct}%
                         </span>
                       </div>
                     </td>
-                    <td className="px-4 py-3.5 whitespace-nowrap">
+                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap">
                       {q.latestResult === "Correct" ? (
-                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400 print:text-emerald-700">
                           <CheckCircle2 className="h-3.5 w-3.5" /> Correct
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600 dark:text-rose-400">
+                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600 dark:text-rose-400 print:text-rose-700">
                           <AlertTriangle className="h-3.5 w-3.5" /> Incorrect
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3.5 whitespace-nowrap font-medium text-slate-700 dark:text-slate-200">
+                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap font-medium text-slate-700 dark:text-slate-200 print:text-slate-900">
                       {q.latestScore} / {q.latestMaxMarks}
                     </td>
                   </tr>
@@ -545,14 +774,14 @@ export function AgentPerformanceReport({
       {/* =========================================================
          SECTION 6: KNOWLEDGE GAPS & COMPETENCY
          ========================================================= */}
-      <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <section className="grid grid-cols-1 gap-6 lg:grid-cols-2 print:grid-cols-2 print-avoid-break">
         {/* Module Competencies */}
-        <div className="card p-6">
+        <div className="card p-6 print:p-4">
           <div className="flex items-center justify-between border-b border-slate-200 pb-3 dark:border-slate-800">
-            <h3 className="font-semibold text-slate-900 dark:text-slate-100">
+            <h3 className="font-semibold text-slate-900 dark:text-slate-100 print:text-slate-900">
               Competency by Module
             </h3>
-            <span className="text-xs text-slate-400">
+            <span className="text-xs text-slate-400 print:text-slate-500">
               {competency.moduleCompetency.length} modules measured
             </span>
           </div>
@@ -564,14 +793,14 @@ export function AgentPerformanceReport({
               {competency.moduleCompetency.map((mod) => (
                 <div key={mod.module}>
                   <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium text-slate-700 dark:text-slate-200">
+                    <span className="font-medium text-slate-700 dark:text-slate-200 print:text-slate-800">
                       {mod.module}
                     </span>
-                    <span className="font-bold text-slate-900 dark:text-white">
+                    <span className="font-bold text-slate-900 dark:text-white print:text-slate-900">
                       {mod.score}%
                     </span>
                   </div>
-                  <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                  <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800 print:bg-slate-200">
                     <div
                       className={`h-full rounded-full transition-all ${
                         mod.score >= 80
@@ -583,7 +812,7 @@ export function AgentPerformanceReport({
                       style={{ width: `${Math.min(100, Math.max(0, mod.score))}%` }}
                     />
                   </div>
-                  <div className="mt-1 flex justify-between text-[11px] text-slate-400">
+                  <div className="mt-1 flex justify-between text-[11px] text-slate-400 print:text-slate-500">
                     <span>{mod.questionsMeasured} question(s)</span>
                     <span>
                       {mod.correctQuestions} passed · {mod.weakQuestions} weak
@@ -596,11 +825,11 @@ export function AgentPerformanceReport({
         </div>
 
         {/* Knowledge Gaps & Coaching Intelligence */}
-        <div className="card p-6 flex flex-col justify-between">
+        <div className="card p-6 print:p-4 flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between border-b border-slate-200 pb-3 dark:border-slate-800">
-              <h3 className="font-semibold text-slate-900 dark:text-slate-100">
-                Knowledge Gaps & Coaching Priorities
+              <h3 className="font-semibold text-slate-900 dark:text-slate-100 print:text-slate-900">
+                Knowledge Gaps &amp; Coaching Priorities
               </h3>
               <Badge
                 color={
@@ -616,15 +845,15 @@ export function AgentPerformanceReport({
             </div>
 
             {/* Coaching recommendation */}
-            <div className="mt-4 rounded-xl bg-slate-50 p-4 dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-700/60">
+            <div className="mt-4 rounded-xl bg-slate-50 p-4 dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-700/60 print:border-slate-200 print:bg-slate-50">
               <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                 Primary Coaching Focus
               </p>
-              <p className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+              <p className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100 print:text-slate-900">
                 {coaching.primaryReason || "No critical weaknesses identified."}
               </p>
               {coaching.recommendedCoachingArea && (
-                <p className="mt-1 text-xs text-brand-600 dark:text-brand-400 font-medium">
+                <p className="mt-1 text-xs text-brand-600 dark:text-brand-400 print:text-brand-700 font-medium">
                   Focus area: {coaching.recommendedCoachingArea}
                 </p>
               )}
@@ -632,7 +861,7 @@ export function AgentPerformanceReport({
 
             {/* Knowledge Gap Category Pills */}
             <div className="mt-4">
-              <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+              <p className="text-xs font-semibold text-slate-600 dark:text-slate-300 print:text-slate-700">
                 Top Identified Knowledge Gap Categories:
               </p>
               {competency.knowledgeGaps.length === 0 ? (
@@ -642,10 +871,10 @@ export function AgentPerformanceReport({
                   {competency.knowledgeGaps.map((gap) => (
                     <span
                       key={gap.category}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300 print:border-amber-300 print:bg-amber-50 print:text-amber-900"
                     >
                       <span>{gap.category}</span>
-                      <span className="rounded-full bg-amber-200/70 px-1.5 py-0.2 text-[10px] dark:bg-amber-800">
+                      <span className="rounded-full bg-amber-200/70 px-1.5 py-0.2 text-[10px] dark:bg-amber-800 print:bg-amber-200">
                         {gap.count}
                       </span>
                     </span>
@@ -656,26 +885,26 @@ export function AgentPerformanceReport({
           </div>
 
           {/* Strongest & Weakest Modules Callout */}
-          <div className="mt-6 grid grid-cols-2 gap-3 pt-4 border-t border-slate-100 dark:border-slate-800 text-xs">
-            <div className="rounded-lg bg-emerald-50/60 p-3 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/40">
+          <div className="mt-6 grid grid-cols-2 gap-3 pt-4 border-t border-slate-100 dark:border-slate-800 print:border-slate-200 text-xs">
+            <div className="rounded-lg bg-emerald-50/60 p-3 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/40 print:border-emerald-200 print:bg-emerald-50">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
                 Strongest Area
               </p>
-              <p className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100">
+              <p className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100 print:text-slate-900">
                 {competency.strongestModule ? competency.strongestModule.module : "N/A"}
               </p>
-              <p className="text-emerald-600 dark:text-emerald-400 font-medium">
+              <p className="text-emerald-600 dark:text-emerald-400 print:text-emerald-700 font-medium">
                 {competency.strongestModule ? `${competency.strongestModule.score}%` : "—"}
               </p>
             </div>
-            <div className="rounded-lg bg-rose-50/60 p-3 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/40">
+            <div className="rounded-lg bg-rose-50/60 p-3 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/40 print:border-rose-200 print:bg-rose-50">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-rose-700 dark:text-rose-400">
                 Weakest Area
               </p>
-              <p className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100">
+              <p className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100 print:text-slate-900">
                 {competency.weakestModule ? competency.weakestModule.module : "N/A"}
               </p>
-              <p className="text-rose-600 dark:text-rose-400 font-medium">
+              <p className="text-rose-600 dark:text-rose-400 print:text-rose-700 font-medium">
                 {competency.weakestModule ? `${competency.weakestModule.score}%` : "—"}
               </p>
             </div>
@@ -686,39 +915,39 @@ export function AgentPerformanceReport({
       {/* =========================================================
          SECTION 7 & 8: OVERALL SCORECARD & PERFORMANCE TREND
          ========================================================= */}
-      <section className="card p-6 shadow-sm">
+      <section className="card p-6 shadow-sm print:p-4 print-avoid-break">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-4 dark:border-slate-800">
           <div>
-            <h3 className="font-semibold text-slate-900 dark:text-slate-100">
-              Performance Trend & Official Scorecard
+            <h3 className="font-semibold text-slate-900 dark:text-slate-100 print:text-slate-900">
+              Performance Trend &amp; Official Scorecard
             </h3>
-            <p className="mt-0.5 text-xs text-slate-500">
+            <p className="mt-0.5 text-xs text-slate-500 print:text-slate-600">
               Historical progression across chronological reviewed attempts.
             </p>
           </div>
-          <div className="text-xs text-slate-500">
-            Calculation: <span className="font-medium text-slate-700 dark:text-slate-300">Total Marks Earned ÷ Total Possible Marks × 100</span>
+          <div className="text-xs text-slate-500 print:text-slate-600">
+            Calculation: <span className="font-medium text-slate-700 dark:text-slate-300 print:text-slate-900">Total Marks Earned ÷ Total Possible Marks × 100</span>
           </div>
         </div>
 
         {/* Timeline Progression */}
         <div className="mt-6">
-          <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 print:text-slate-500 mb-3">
             Attempt Timeline Progression
           </p>
           {progression.length === 0 ? (
             <p className="text-sm text-slate-400">No reviewed attempts recorded yet.</p>
           ) : (
-            <div className="flex items-center gap-2 overflow-x-auto pb-2">
+            <div className={`flex items-center gap-2 pb-2 ${isPrint ? "flex-wrap" : "overflow-x-auto"}`}>
               {progression.map((pt, idx) => {
                 const isLast = idx === progression.length - 1;
                 return (
                   <div key={pt.attemptId} className="flex items-center shrink-0">
-                    <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3 text-center dark:border-slate-700 dark:bg-slate-800/60 min-w-[110px]">
-                      <p className="text-[11px] text-slate-400 truncate max-w-[100px]" title={pt.examName}>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3 text-center dark:border-slate-700 dark:bg-slate-800/60 print:border-slate-200 print:bg-slate-50 min-w-[110px]">
+                      <p className="text-[11px] text-slate-400 print:text-slate-500 truncate max-w-[100px]" title={pt.examName}>
                         {pt.examName}
                       </p>
-                      <p className="mt-1 text-base font-extrabold text-slate-900 dark:text-white">
+                      <p className="mt-1 text-base font-extrabold text-slate-900 dark:text-white print:text-slate-900">
                         {pt.scorePct}%
                       </p>
                       <p className="mt-0.5 text-[10px] text-slate-500">
@@ -726,7 +955,7 @@ export function AgentPerformanceReport({
                       </p>
                     </div>
                     {!isLast && (
-                      <ArrowRight className="mx-2 h-4 w-4 text-slate-300 dark:text-slate-600 shrink-0" />
+                      <ArrowRight className="mx-2 h-4 w-4 text-slate-300 dark:text-slate-600 print:text-slate-400 shrink-0" />
                     )}
                   </div>
                 );
@@ -736,9 +965,9 @@ export function AgentPerformanceReport({
         </div>
 
         {/* Official Calculation Disclosure Note */}
-        <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-800/30">
-          <p className="font-semibold text-slate-700 dark:text-slate-300">
-            About the Overall Score & Analytics Eligibility
+        <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-800/30 print:border-slate-200 print:bg-slate-50">
+          <p className="font-semibold text-slate-700 dark:text-slate-300 print:text-slate-800">
+            About the Overall Score &amp; Analytics Eligibility
           </p>
           <p className="mt-1">
             Overall score is based on eligible reviewed attempts ({summary.totalMarksEarned} marks earned of {summary.totalPossibleMarks} possible marks).
@@ -758,33 +987,37 @@ export function AgentPerformanceReport({
 function ExamPerformanceRows({
   perf,
   isExpanded,
+  isPrint = false,
   onToggle,
 }: {
   perf: AgentExamPerformance;
   isExpanded: boolean;
-  onToggle: () => void;
+  isPrint?: boolean;
+  onToggle?: () => void;
 }) {
+  const showHistory = isPrint ? perf.attempts.length > 0 : isExpanded;
+
   return (
     <>
       <tr
         onClick={onToggle}
-        className="cursor-pointer hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition"
+        className={`${onToggle ? "cursor-pointer hover:bg-slate-50/80 dark:hover:bg-slate-800/40" : ""} transition print:hover:bg-transparent`}
       >
-        <td className="px-6 py-4">
+        <td className="px-6 py-4 print:px-3 print:py-2.5">
           <div className="flex items-center gap-2">
-            <span className="font-medium text-slate-900 dark:text-white">
+            <span className="font-medium text-slate-900 dark:text-white print:text-slate-900">
               {perf.examName}
             </span>
             {perf.isArchived && <Badge color="red">Archived</Badge>}
           </div>
           {perf.category && (
-            <p className="mt-0.5 text-xs text-slate-400">{perf.category}</p>
+            <p className="mt-0.5 text-xs text-slate-400 print:text-slate-500">{perf.category}</p>
           )}
         </td>
-        <td className="px-4 py-4 whitespace-nowrap text-xs text-slate-500">
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-xs text-slate-500">
           {perf.mode === "until_perfect" ? "Perfect 10" : "Normal"}
         </td>
-        <td className="px-4 py-4 whitespace-nowrap">
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap">
           <span
             className={`inline-block h-2 w-2 rounded-full mr-1.5 ${
               perf.status === "archived"
@@ -794,84 +1027,86 @@ function ExamPerformanceRows({
                 : "bg-amber-500"
             }`}
           />
-          <span className="capitalize text-xs text-slate-600 dark:text-slate-300">
+          <span className="capitalize text-xs text-slate-600 dark:text-slate-300 print:text-slate-800">
             {perf.status}
           </span>
         </td>
-        <td className="px-4 py-4 whitespace-nowrap font-medium text-slate-800 dark:text-slate-200">
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap font-medium text-slate-800 dark:text-slate-200 print:text-slate-900">
           {perf.attemptsTaken}
         </td>
-        <td className="px-4 py-4 whitespace-nowrap font-semibold">
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap font-semibold">
           {perf.latestAttemptScore !== null ? `${perf.latestAttemptScore}%` : "—"}
         </td>
-        <td className="px-4 py-4 whitespace-nowrap text-slate-600 dark:text-slate-300">
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-slate-600 dark:text-slate-300 print:text-slate-800">
           {perf.bestScore !== null ? `${perf.bestScore}%` : "—"}
         </td>
-        <td className="px-4 py-4 whitespace-nowrap text-slate-500">
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-slate-500">
           {perf.averageScore !== null ? `${perf.averageScore}%` : "—"}
         </td>
-        <td className="px-4 py-4 whitespace-nowrap text-xs text-slate-600 dark:text-slate-300">
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-xs text-slate-600 dark:text-slate-300 print:text-slate-800">
           {perf.totalMarks !== null && perf.maxMarks !== null
             ? `${perf.totalMarks}/${perf.maxMarks}`
             : "—"}
         </td>
-        <td className="px-4 py-4 whitespace-nowrap text-xs text-slate-500">
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-xs text-slate-500">
           {formatTimeTaken(perf.timeTakenSeconds)}
         </td>
-        <td className="px-4 py-4 whitespace-nowrap">
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap">
           <span
             className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
               perf.reviewStatus === "Reviewed"
-                ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+                ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 print:bg-emerald-50 print:text-emerald-800"
                 : perf.reviewStatus === "Awaiting Review"
-                ? "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
+                ? "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 print:bg-amber-50 print:text-amber-800"
                 : perf.reviewStatus === "In Progress"
-                ? "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300"
-                : "bg-slate-100 text-slate-500 dark:bg-slate-800"
+                ? "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 print:bg-blue-50 print:text-blue-800"
+                : "bg-slate-100 text-slate-500 dark:bg-slate-800 print:bg-slate-100 print:text-slate-600"
             }`}
           >
             {perf.reviewStatus}
           </span>
         </td>
-        <td className="px-4 py-4 whitespace-nowrap">
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap">
           <span
             className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
               perf.completionStatus === "Completed"
-                ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+                ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 print:bg-emerald-50 print:text-emerald-800"
                 : perf.completionStatus === "Pending"
-                ? "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
-                : "bg-slate-100 text-slate-500 dark:bg-slate-800"
+                ? "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 print:bg-amber-50 print:text-amber-800"
+                : "bg-slate-100 text-slate-500 dark:bg-slate-800 print:bg-slate-100 print:text-slate-600"
             }`}
           >
             {perf.completionStatus}
           </span>
         </td>
-        <td className="px-4 py-4 text-center">
-          <button
-            type="button"
-            className="rounded p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
-            title={isExpanded ? "Collapse History" : "Expand Attempt History"}
-          >
-            {isExpanded ? (
-              <ChevronUp className="h-4 w-4" />
-            ) : (
-              <ChevronDown className="h-4 w-4" />
-            )}
-          </button>
-        </td>
+        {!isPrint && (
+          <td className="px-4 py-4 text-center print:hidden">
+            <button
+              type="button"
+              className="rounded p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
+              title={isExpanded ? "Collapse History" : "Expand Attempt History"}
+            >
+              {isExpanded ? (
+                <ChevronUp className="h-4 w-4" />
+              ) : (
+                <ChevronDown className="h-4 w-4" />
+              )}
+            </button>
+          </td>
+        )}
       </tr>
 
-      {/* EXPANDED ATTEMPT HISTORY (SECTION 3) */}
-      {isExpanded && (
-        <tr className="bg-slate-50/70 dark:bg-slate-900/50">
-          <td colSpan={12} className="px-8 py-4 border-y border-slate-200 dark:border-slate-800">
+      {/* ATTEMPT HISTORY (SECTION 3) */}
+      {showHistory && (
+        <tr className="bg-slate-50/70 dark:bg-slate-900/50 print:bg-slate-50 print-avoid-break">
+          <td colSpan={isPrint ? 11 : 12} className="px-8 py-4 print:px-4 print:py-3 border-y border-slate-200 dark:border-slate-800 print:border-slate-200">
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 print:text-slate-700">
                   Attempt History for &ldquo;{perf.examName}&rdquo; ({perf.attempts.length} attempts)
                 </p>
                 {perf.mergedScorecard && (
-                  <span className="text-xs text-brand-600 dark:text-brand-400 font-medium">
+                  <span className="text-xs text-brand-600 dark:text-brand-400 print:text-brand-700 font-medium">
                     Merged Scorecard: {perf.mergedScorecard.percentage}% ({perf.mergedScorecard.totalMarks}/{perf.mergedScorecard.maxTotalMarks} marks)
                   </span>
                 )}
@@ -880,35 +1115,39 @@ function ExamPerformanceRows({
               {perf.attempts.length === 0 ? (
                 <p className="text-xs text-slate-400">No attempts have been recorded for this test.</p>
               ) : (
-                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 print:grid-cols-3">
                   {perf.attempts.map((att) => (
                     <div
                       key={att.id}
-                      className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm dark:border-slate-800 dark:bg-slate-800/80"
+                      className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm dark:border-slate-800 dark:bg-slate-800/80 print:border-slate-200 print:bg-white"
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-1.5">
-                          <span className="font-bold text-slate-900 dark:text-white text-sm">
+                          <span className="font-bold text-slate-900 dark:text-white print:text-slate-900 text-sm">
                             Attempt #{att.attemptNumber}
                           </span>
-                          {att.isReattempt && (
-                            <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+                          {att.isReattempt ? (
+                            <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 print:bg-indigo-50 print:text-indigo-800">
                               Retake
                             </span>
-                          )}
-                          {!att.isReattempt && att.attemptNumber === 1 && (
-                            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+                          ) : att.attemptNumber === 1 ? (
+                            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300 print:bg-slate-100 print:text-slate-700">
                               Original
+                            </span>
+                          ) : null}
+                          {att.isArchivedExam && (
+                            <span className="rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 print:bg-rose-50 print:text-rose-800">
+                              Archived
                             </span>
                           )}
                         </div>
                         <span
                           className={`rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize ${
                             att.status === "reviewed"
-                              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300"
+                              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 print:bg-emerald-100 print:text-emerald-800"
                               : att.status === "submitted" || att.status === "review_in_progress"
-                              ? "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300"
-                              : "bg-slate-100 text-slate-600 dark:bg-slate-700"
+                              ? "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 print:bg-amber-100 print:text-amber-800"
+                              : "bg-slate-100 text-slate-600 dark:bg-slate-700 print:bg-slate-100 print:text-slate-700"
                           }`}
                         >
                           {att.status.replace(/_/g, " ")}
@@ -917,10 +1156,10 @@ function ExamPerformanceRows({
 
                       <div className="mt-3 flex items-baseline justify-between">
                         <div>
-                          <p className="text-xl font-extrabold text-slate-900 dark:text-white">
+                          <p className="text-xl font-extrabold text-slate-900 dark:text-white print:text-slate-900">
                             {att.percentage !== null ? `${att.percentage}%` : "—"}
                           </p>
-                          <p className="text-xs text-slate-400">
+                          <p className="text-xs text-slate-400 print:text-slate-500">
                             {att.totalMarks !== null && att.maxTotalMarks !== null
                               ? `${att.totalMarks} / ${att.maxTotalMarks} marks`
                               : "Pending marks"}
@@ -929,7 +1168,7 @@ function ExamPerformanceRows({
                         <div className="text-right text-xs text-slate-500">
                           <p>Time: {formatTimeTaken(att.timeTakenSeconds)}</p>
                           {att.submittedAt && (
-                            <p className="text-[11px] text-slate-400">
+                            <p className="text-[11px] text-slate-400 print:text-slate-500">
                               {new Date(att.submittedAt).toLocaleDateString()}
                             </p>
                           )}
