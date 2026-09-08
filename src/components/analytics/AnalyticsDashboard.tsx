@@ -38,6 +38,9 @@ import type {
 
 import { EmptyState } from "@/components/ui/Primitives";
 import { MetricInfo } from "@/components/ui/MetricInfo";
+import { AgentReportGenerator } from "@/components/reports/AgentReportGenerator";
+import { AgentPerformanceReport } from "@/components/reports/AgentPerformanceReport";
+import type { AgentPerformanceReportData } from "@/lib/agentReports";
 
 /*
  * Session-scoped cache for this dashboard's combined dataset. Lives outside
@@ -66,7 +69,9 @@ export function AnalyticsDashboard() {
 
   const [selectedAgent, setSelectedAgent] =
     useState<AgentCompetency | null>(null);
-    const [selectedModule, setSelectedModule] = useState<string | null>(null);
+  const [selectedModule, setSelectedModule] = useState<string | null>(null);
+  const [activeReportData, setActiveReportData] =
+    useState<AgentPerformanceReportData[] | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -191,6 +196,15 @@ const coachingCounts = useMemo(
       <p className="text-sm text-slate-400">
         Loading analytics...
       </p>
+    );
+  }
+
+  if (activeReportData && activeReportData.length > 0) {
+    return (
+      <AgentPerformanceReport
+        reports={activeReportData}
+        onBack={() => setActiveReportData(null)}
+      />
     );
   }
 
@@ -371,15 +385,26 @@ const coachingCounts = useMemo(
       <div className="space-y-7">
         {/* HEADER */}
 
-        <div>
-          <h1 className="text-2xl font-semibold">
-            Analytics
-          </h1>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold">
+              Analytics
+            </h1>
 
-          <p className="mt-1 text-sm text-slate-500">
-            Agent competency, assessment activity and
-            knowledge gaps.
-          </p>
+            <p className="mt-1 text-sm text-slate-500">
+              Agent competency, assessment activity and
+              knowledge gaps.
+            </p>
+          </div>
+
+          <AgentReportGenerator
+            preloadedExams={exams}
+            preloadedAttempts={attempts}
+            preloadedQuestions={questions}
+            preloadedUsers={users}
+            onReportsGenerated={(reports) => setActiveReportData(reports)}
+            buttonLabel="Generate Agent Report"
+          />
         </div>
 
         {/* OPERATIONAL SUMMARY */}
