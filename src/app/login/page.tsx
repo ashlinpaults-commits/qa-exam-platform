@@ -8,7 +8,8 @@ import {
 } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { ensureUserProfile } from "@/lib/users";
-import { ShieldCheck, Loader2 } from "lucide-react";
+import Image from "next/image";
+import { Loader2 } from "lucide-react";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -50,11 +51,32 @@ export default function LoginPage() {
     <div className="flex min-h-screen">
       {/* Left brand panel */}
       <div className="hidden w-1/2 flex-col justify-between bg-gradient-to-br from-brand-600 to-brand-700 p-12 text-white lg:flex">
-        <div className="flex items-center gap-2 text-lg font-semibold">
-          <ShieldCheck className="h-6 w-6" />
-          QA Exam Platform
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-white p-1.5 shadow-md">
+            <Image
+              src="/logo-mark.png"
+              alt="QA Exam Platform Logo"
+              width={36}
+              height={36}
+              className="h-full w-full object-contain"
+              priority
+            />
+          </div>
+          <span className="text-xl font-bold tracking-tight text-white">
+            QA Exam Platform
+          </span>
         </div>
         <div>
+          <div className="mb-6 inline-block overflow-hidden rounded-2xl bg-white/95 p-4 shadow-xl backdrop-blur">
+            <Image
+              src="/logo.png"
+              alt="QA Exam Platform"
+              width={200}
+              height={96}
+              className="h-24 w-auto object-contain"
+              priority
+            />
+          </div>
           <h1 className="text-3xl font-semibold leading-tight">
             Evaluate support agents with real, human-reviewed exams.
           </h1>
@@ -69,6 +91,23 @@ export default function LoginPage() {
       {/* Right form panel */}
       <div className="flex w-full items-center justify-center bg-surface p-8 dark:bg-surface-dark lg:w-1/2">
         <div className="w-full max-w-sm">
+          {/* Mobile brand header */}
+          <div className="mb-8 flex items-center gap-3 lg:hidden">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white p-1.5 shadow-sm ring-1 ring-slate-200">
+              <Image
+                src="/logo-mark.png"
+                alt="QA Exam Platform Logo"
+                width={32}
+                height={32}
+                className="h-full w-full object-contain"
+                priority
+              />
+            </div>
+            <span className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">
+              QA Exam Platform
+            </span>
+          </div>
+
           <h2 className="text-2xl font-semibold">
             {mode === "signin" ? "Welcome back" : "Create an account"}
           </h2>
