@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 
 import { getExam } from "@/lib/exams";
-import { fetchAttemptsForExam } from "@/lib/attempts";
+import { fetchAttemptsForExam, computeExamMasterScorecard } from "@/lib/attempts";
 import { fetchAllUsers } from "@/lib/users";
 import { getQuestionsByIds } from "@/lib/questions";
 
@@ -28,6 +28,7 @@ import type {
   ExamAttempt,
   Question,
   AttemptAnswer,
+  ExamMasterScorecard,
 } from "@/types";
 
 import {
@@ -45,6 +46,7 @@ type AgentResult = {
   attempts: ExamAttempt[];
   latestAttempt: ExamAttempt | undefined;
   latestReviewed: ExamAttempt | undefined;
+  masterScorecard: ExamMasterScorecard;
   completed: boolean;
   awaitingReview: boolean;
   inProgress: boolean;
@@ -183,17 +185,14 @@ export function ExamResultsScreen({
                 1
             ];
 
+          const masterScorecard =
+            computeExamMasterScorecard(
+              exam,
+              agentAttempts
+            );
+
           const completed =
-            exam.mode ===
-            "until_perfect"
-              ? Boolean(
-                  latestReviewed &&
-                    latestReviewed.maxTotalMarks &&
-                    latestReviewed.totalMarks ===
-                      latestReviewed.maxTotalMarks
-                )
-              : reviewedAttempts.length >
-                0;
+            masterScorecard.isCompleted;
 
           const awaitingReview =
             agentAttempts.some(
@@ -220,6 +219,7 @@ export function ExamResultsScreen({
             attempts: agentAttempts,
             latestAttempt,
             latestReviewed,
+            masterScorecard,
             completed,
             awaitingReview,
             inProgress,
@@ -441,7 +441,11 @@ export function ExamResultsScreen({
                   </th>
 
                   <th className="px-5 py-3">
-                    Latest Score
+                    Master Score
+                  </th>
+
+                  <th className="px-5 py-3">
+                    Progress
                   </th>
 
                   <th className="px-5 py-3">
@@ -482,6 +486,11 @@ export function ExamResultsScreen({
           attempt={
             selectedAttempt
           }
+          agentAttempts={attempts.filter(
+            (a) =>
+              a.agentId ===
+              selectedAttempt.agentId
+          )}
           exam={exam}
           questions={questions}
           agentName={
@@ -599,28 +608,42 @@ function AgentRow({
       </td>
 
       <td className="px-5 py-4">
-        {result.latestReviewed
-          ?.maxTotalMarks ? (
+        {result.masterScorecard.reviewedAttemptsCount > 0 ? (
           <div>
             <p className="font-semibold">
-              {result.latestReviewed
-                .totalMarks ?? 0}
-              /
-              {
-                result.latestReviewed
-                  .maxTotalMarks
-              }
+              {result.masterScorecard.currentMasterScore} / {result.masterScorecard.masterTotalMarks}
+            </p>
+
+            {result.masterScorecard.latestAttemptGain !== null && (
+              <span
+                className={`inline-block mt-0.5 text-[11px] font-semibold px-1.5 py-0.5 rounded ${
+                  result.masterScorecard.latestAttemptGain > 0
+                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300"
+                    : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                }`}
+              >
+                {result.masterScorecard.latestAttemptGain > 0
+                  ? `+${result.masterScorecard.latestAttemptGain} pts`
+                  : `${result.masterScorecard.latestAttemptGain} pts`}
+              </span>
+            )}
+          </div>
+        ) : (
+          <span className="text-slate-400">
+            -
+          </span>
+        )}
+      </td>
+
+      <td className="px-5 py-4">
+        {result.masterScorecard.reviewedAttemptsCount > 0 ? (
+          <div>
+            <p className="font-semibold text-brand-600 dark:text-brand-400">
+              {result.masterScorecard.masterPercentage}%
             </p>
 
             <p className="text-xs text-slate-500">
-              {Math.round(
-                ((result.latestReviewed
-                  .totalMarks ?? 0) /
-                  result.latestReviewed
-                    .maxTotalMarks) *
-                  100
-              )}
-              %
+              {result.masterScorecard.questionsMastered} / {exam.questions.length} Mastered
             </p>
           </div>
         ) : (
@@ -827,6 +850,7 @@ function StatusBadge({
 
 function AttemptDetailsModal({
   attempt,
+  agentAttempts = [],
   exam,
   questions,
   agentName,
@@ -835,6 +859,7 @@ function AttemptDetailsModal({
   onClose,
 }: {
   attempt: ExamAttempt;
+  agentAttempts?: ExamAttempt[];
   exam: Exam;
   questions: Question[];
   agentName: string;
@@ -842,6 +867,19 @@ function AttemptDetailsModal({
   previousAttempt?: ExamAttempt;
   onClose: () => void;
 }) {
+  const masterScorecard = useMemo(() => {
+    return computeExamMasterScorecard(
+      exam,
+      agentAttempts.length > 0 ? agentAttempts : [attempt]
+    );
+  }, [exam, agentAttempts, attempt]);
+
+  const progressionStep = masterScorecard.progression.find(
+    (p) =>
+      p.attemptId === attempt.id ||
+      p.attemptNumber === attempt.attemptNumber
+  );
+
   const [
     expandedQuestions,
     setExpandedQuestions,
@@ -1037,24 +1075,55 @@ function AttemptDetailsModal({
 
           {/* TOP STATS */}
 
-          <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
+          <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
             <ModalStat
-              label="Score"
+              label="Current Exam Score"
               value={
-                attempt.totalMarks !==
-                  undefined &&
-                attempt.maxTotalMarks
-                  ? `${attempt.totalMarks}/${attempt.maxTotalMarks}`
+                progressionStep?.cumulativeMasterScore !== undefined && progressionStep?.cumulativeMasterScore !== null
+                  ? `${progressionStep.cumulativePercentage}% (${progressionStep.cumulativeMasterScore} / ${masterScorecard.masterTotalMarks})`
+                  : attempt.totalMarks !== undefined && attempt.maxTotalMarks
+                  ? `${attempt.totalMarks}/${attempt.maxTotalMarks} (${percentage !== null ? `${percentage}%` : "-"})`
                   : "Pending"
               }
             />
 
             <ModalStat
-              label="Percentage"
+              label="Master Progress"
               value={
-                percentage !== null
-                  ? `${percentage}%`
-                  : "-"
+                progressionStep?.cumulativeMasterScore !== undefined && progressionStep?.cumulativeMasterScore !== null
+                  ? `${progressionStep.cumulativeMasterScore} / ${masterScorecard.masterTotalMarks} (${progressionStep.cumulativePercentage}%)`
+                  : `${masterScorecard.currentMasterScore} / ${masterScorecard.masterTotalMarks}`
+              }
+            />
+
+            <ModalStat
+              label="Progress Gain"
+              value={
+                progressionStep?.progressGain !== null && progressionStep?.progressGain !== undefined
+                  ? progressionStep.progressGain > 0
+                    ? `+${progressionStep.progressGain} pts`
+                    : `${progressionStep.progressGain} pts`
+                  : "—"
+              }
+            />
+
+            <ModalStat
+              label={attempt.isReattempt || attempt.attemptNumber > 1 ? "This Attempt" : "Attempt Score"}
+              value={
+                attempt.totalMarks !==
+                  undefined &&
+                attempt.maxTotalMarks
+                  ? `${attempt.totalMarks}/${attempt.maxTotalMarks} (${percentage !== null ? `${percentage}%` : "-"})`
+                  : "Pending"
+              }
+            />
+
+            <ModalStat
+              label="Mastered"
+              value={
+                progressionStep?.questionsMasteredSoFar !== undefined
+                  ? `${progressionStep.questionsMasteredSoFar} / ${exam.questions.length}`
+                  : `${masterScorecard.questionsMastered} / ${exam.questions.length}`
               }
             />
 
@@ -1066,14 +1135,6 @@ function AttemptDetailsModal({
                       attempt.timeTakenSeconds
                     )
                   : "-"
-              }
-            />
-
-            <ModalStat
-              label="Reviewer"
-              value={
-                reviewerName ??
-                "Not reviewed"
               }
             />
 

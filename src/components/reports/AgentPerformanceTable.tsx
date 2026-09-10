@@ -1,11 +1,12 @@
 "use client";
 
-import type { ExamAttempt, AppUser } from "@/types";
+import type { ExamAttempt, AppUser, ExamMasterScorecard } from "@/types";
 
 interface AgentRow {
   user: AppUser;
   latestAttempt?: ExamAttempt;
   attempts: number;
+  masterScorecard?: ExamMasterScorecard;
 }
 
 interface Props {
@@ -23,7 +24,7 @@ export default function AgentPerformanceTable({
         </h2>
 
         <p className="mt-1 text-sm text-slate-500">
-          Latest reviewed competency for each trainee.
+          Master score and competency progress for each trainee.
         </p>
       </div>
 
@@ -31,7 +32,7 @@ export default function AgentPerformanceTable({
         <thead className="bg-slate-50">
           <tr>
             <th className="px-6 py-3 text-left">Agent</th>
-            <th className="px-6 py-3 text-left">Score</th>
+            <th className="px-6 py-3 text-left">Master Score</th>
             <th className="px-6 py-3 text-left">Attempts</th>
             <th className="px-6 py-3 text-left">Status</th>
           </tr>
@@ -39,14 +40,25 @@ export default function AgentPerformanceTable({
 
         <tbody>
           {rows.map((row) => {
-            const score =
-              row.latestAttempt?.maxTotalMarks
-                ? Math.round(
-                    ((row.latestAttempt.totalMarks ?? 0) /
-                      row.latestAttempt.maxTotalMarks) *
-                      100
-                  )
-                : 0;
+            const hasReviewed = row.masterScorecard
+              ? row.masterScorecard.reviewedAttemptsCount > 0
+              : Boolean(row.latestAttempt?.maxTotalMarks);
+
+            const score = row.masterScorecard && hasReviewed
+              ? row.masterScorecard.masterPercentage
+              : row.latestAttempt?.maxTotalMarks
+              ? Math.round(
+                  ((row.latestAttempt.totalMarks ?? 0) /
+                    row.latestAttempt.maxTotalMarks) *
+                    100
+                )
+              : 0;
+
+            const marksDisplay = row.masterScorecard && hasReviewed
+              ? `${row.masterScorecard.currentMasterScore}/${row.masterScorecard.masterTotalMarks}`
+              : row.latestAttempt?.maxTotalMarks
+              ? `${row.latestAttempt.totalMarks ?? 0}/${row.latestAttempt.maxTotalMarks}`
+              : null;
 
             return (
               <tr
@@ -76,7 +88,12 @@ export default function AgentPerformanceTable({
                       />
                     </div>
 
-                    <span>{score}%</span>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="font-semibold">{hasReviewed ? `${score}%` : "—"}</span>
+                      {marksDisplay && (
+                        <span className="text-xs text-slate-400">({marksDisplay})</span>
+                      )}
+                    </div>
                   </div>
                 </td>
 

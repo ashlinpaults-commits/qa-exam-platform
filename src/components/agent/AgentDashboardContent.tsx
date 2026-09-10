@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 import { fetchAssignedExams } from "@/lib/exams";
-import { fetchAttemptsForAgent } from "@/lib/attempts";
+import { fetchAttemptsForAgent, computeExamMasterScorecard } from "@/lib/attempts";
 import type { Exam, ExamAttempt } from "@/types";
 import {
   Badge,
@@ -117,67 +117,47 @@ export function AgentDashboardContent() {
    */
 
   /**
-   * Group reviewed attempts by examId to isolate authoritative latest attempts.
-   * This prevents multiple reattempts for the same exam from distorting competency.
+   * Calculate authoritative ExamMasterScorecard for every assigned exam.
+   * Ensures non-decreasing question mastery and fixed original master denominators.
    */
-  const reviewedByExam = new Map<string, ExamAttempt[]>();
-  for (const attempt of reviewed) {
-    if (!attempt.examId) continue;
-    const list = reviewedByExam.get(attempt.examId) || [];
-    list.push(attempt);
-    reviewedByExam.set(attempt.examId, list);
+  const examMasterScorecardMap = new Map<string, ReturnType<typeof computeExamMasterScorecard>>();
+  for (const exam of exams) {
+    const examAttempts = attempts.filter((a) => a.examId === exam.id);
+    const scorecard = computeExamMasterScorecard(exam, examAttempts);
+    examMasterScorecardMap.set(exam.id, scorecard);
   }
 
-  const authoritativeReviewedAttempts: ExamAttempt[] = [];
-  for (const [, examAttempts] of reviewedByExam.entries()) {
-    // Sort descending by attemptNumber, then reviewedAt/startedAt timestamp
-    const sorted = [...examAttempts].sort(
-      (a, b) =>
-        (b.attemptNumber ?? 0) - (a.attemptNumber ?? 0) ||
-        (b.reviewedAt ?? 0) - (a.reviewedAt ?? 0) ||
-        (b.startedAt ?? 0) - (a.startedAt ?? 0)
-    );
-    if (sorted.length > 0) {
-      authoritativeReviewedAttempts.push(sorted[0]);
+  let totalMasterEarned = 0;
+  let totalMasterPossible = 0;
+
+  for (const exam of exams) {
+    const scorecard = examMasterScorecardMap.get(exam.id);
+    if (scorecard && scorecard.reviewedAttemptsCount > 0) {
+      totalMasterEarned += scorecard.currentMasterScore;
+      totalMasterPossible += scorecard.masterTotalMarks;
     }
   }
 
-  // Calculate overall competency using ONE authoritative result per unique exam
-  const totalCompetencyPct = authoritativeReviewedAttempts.reduce((sum, attempt) => {
-    const total = attempt.totalMarks ?? 0;
-    const max = attempt.maxTotalMarks ?? 0;
-    if (max <= 0) return sum;
-    const pct = total / max;
-    return sum + (Number.isFinite(pct) ? pct : 0);
-  }, 0);
+  const overallScorePct =
+    totalMasterPossible > 0
+      ? Math.round((totalMasterEarned / totalMasterPossible) * 100)
+      : 0;
 
-  const overallScorePct = authoritativeReviewedAttempts.length > 0
-    ? Math.round((totalCompetencyPct / authoritativeReviewedAttempts.length) * 100)
-    : 0;
-
-  const perfectExams = authoritativeReviewedAttempts.filter(
-    (attempt) =>
-      Boolean(attempt.maxTotalMarks) &&
-      attempt.maxTotalMarks! > 0 &&
-      attempt.totalMarks === attempt.maxTotalMarks
-  ).length;
+  const perfectExams = exams.filter((exam) => {
+    const sc = examMasterScorecardMap.get(exam.id);
+    return Boolean(sc && sc.isCompleted && sc.currentMasterScore >= sc.masterTotalMarks && sc.masterTotalMarks > 0);
+  }).length;
 
   /**
-   * Evaluate Strong Areas (>= 85%) and Weak Areas (< 70%) per unique exam.
-   * Uses authoritative attempt per exam and enforces mutual exclusivity.
+   * Evaluate Strong Areas (>= 85%) and Weak Areas (< 70%) per unique exam using Master Score.
    */
   const examCompetencies: { name: string; pct: number }[] = [];
 
-  for (const attempt of authoritativeReviewedAttempts) {
-    const exam = exams.find((item) => item.id === attempt.examId);
-    if (!exam) continue;
+  for (const exam of exams) {
+    const sc = examMasterScorecardMap.get(exam.id);
+    if (!sc || sc.reviewedAttemptsCount === 0 || sc.masterTotalMarks <= 0) continue;
 
-    const max = attempt.maxTotalMarks ?? 0;
-    if (max <= 0) continue;
-    const total = attempt.totalMarks ?? 0;
-    const pct = total / max;
-    if (!Number.isFinite(pct)) continue;
-
+    const pct = sc.currentMasterScore / sc.masterTotalMarks;
     const cleanTitle = deriveCleanTitle(exam, 0).title;
     examCompetencies.push({
       name: cleanTitle,
@@ -285,18 +265,12 @@ export function AgentDashboardContent() {
       return false;
     }
 
-    if (!latestReviewed.maxTotalMarks) {
-      return false;
-    }
-
     /**
      * Perfect 10:
-     * Retry only if latest official score was below perfect.
+     * Retry only if master score has not yet reached completion.
      */
-    return (
-      latestReviewed.totalMarks !==
-      latestReviewed.maxTotalMarks
-    );
+    const sc = examMasterScorecardMap.get(exam.id);
+    return Boolean(sc && !sc.isCompleted);
   });
 
   return (
@@ -423,14 +397,10 @@ export function AgentDashboardContent() {
                       a.attemptNumber
                   )[0];
 
+              const sc = examMasterScorecardMap.get(exam.id);
               const isRetest =
                 exam.mode === "until_perfect" &&
-                Boolean(latestReviewed) &&
-                Boolean(
-                  latestReviewed?.maxTotalMarks
-                ) &&
-                latestReviewed?.totalMarks !==
-                  latestReviewed?.maxTotalMarks;
+                Boolean(sc && sc.reviewedAttemptsCount > 0 && !sc.isCompleted);
 
               const highestAttemptNumber =
                 examAttempts.length > 0

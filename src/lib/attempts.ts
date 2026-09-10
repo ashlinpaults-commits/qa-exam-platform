@@ -18,6 +18,9 @@ import type {
   Exam,
   KnowledgeGapCategory,
   Question,
+  ExamMasterScorecard,
+  AttemptProgressionStep,
+  QuestionMasteryRecord,
 } from "@/types";
 import { stripUndefined } from "./questions";
 
@@ -1126,7 +1129,248 @@ export async function amendScorecard(
 }
 
 /* =========================================================
-   MERGE SCORECARDS (ORIGINAL + REATTEMPTS)
+   PROGRESSIVE MASTER SCORECARD CALCULATION
+   ========================================================= */
+
+/**
+ * Authoritative Master Scorecard engine for an agent and exam.
+ * Reconciles progressive attempts/reassignments against the ORIGINAL exam master total.
+ * Enforces non-decreasing mastery across the attempt chain.
+ */
+export function computeExamMasterScorecard(
+  exam: Exam,
+  attempts: ExamAttempt[]
+): ExamMasterScorecard {
+  const agentId = attempts[0]?.agentId || "";
+  const examName = exam.name || "Exam";
+
+  // 1. Establish Master Assigned Exam Questions
+  const examQuestionRefs = [...(exam.questions || [])].sort((a, b) => a.order - b.order);
+
+  // Fallback for legacy exams with empty questions list: derive from attempt answers
+  const uniqueQuestionIds: string[] = [];
+  if (examQuestionRefs.length > 0) {
+    examQuestionRefs.forEach((ref) => {
+      if (!uniqueQuestionIds.includes(ref.questionId)) {
+        uniqueQuestionIds.push(ref.questionId);
+      }
+    });
+  } else {
+    attempts.forEach((a) => {
+      (a.answers || []).forEach((ans) => {
+        if (!uniqueQuestionIds.includes(ans.questionId)) {
+          uniqueQuestionIds.push(ans.questionId);
+        }
+      });
+    });
+  }
+
+  // Determine maxMarks per question (defaults to 10 if unspecified)
+  const questionMaxMarksMap = new Map<string, number>();
+  uniqueQuestionIds.forEach((qId) => {
+    let max = 10;
+    for (const a of attempts) {
+      const match = a.answers?.find((ans) => ans.questionId === qId);
+      if (match?.maxMarks && match.maxMarks > 0) {
+        max = match.maxMarks;
+        break;
+      }
+    }
+    questionMaxMarksMap.set(qId, max);
+  });
+
+  // MASTER TOTAL MARKS: Fixed denominator of the original assigned exam
+  const masterTotalMarks = uniqueQuestionIds.reduce(
+    (sum, qId) => sum + (questionMaxMarksMap.get(qId) || 10),
+    0
+  );
+
+  // 2. Sort attempts chronologically
+  const sortedAttempts = [...attempts].sort(
+    (a, b) => (a.attemptNumber || 0) - (b.attemptNumber || 0) || (a.startedAt || 0) - (b.startedAt || 0)
+  );
+
+  const reviewedAttempts = sortedAttempts.filter((a) => a.status === "reviewed");
+
+  // 3. Question Mastery tracking map
+  const masteryMap = new Map<string, QuestionMasteryRecord>();
+  uniqueQuestionIds.forEach((qId) => {
+    const snap = exam.questionSnapshots?.[qId];
+    const maxMarks = questionMaxMarksMap.get(qId) || 10;
+    masteryMap.set(qId, {
+      questionId: qId,
+      questionText: snap?.questionText || "",
+      module: snap?.module || "General",
+      feature: snap?.feature || "General",
+      maxMarks,
+      bestMarks: 0,
+      isMastered: false,
+      timesAttempted: 0,
+      timesIncorrect: 0,
+      progression: [],
+      latestAttemptNumber: 0,
+    });
+  });
+
+  // 4. Trace Progression Chronologically Across Reviewed Attempts
+  const progressionSteps: AttemptProgressionStep[] = [];
+  let previousMasterScore = 0;
+
+  for (const attempt of reviewedAttempts) {
+    const attemptMarks = (attempt.answers || []).reduce((sum, a) => sum + (a.marks ?? 0), 0);
+    const attemptMaxMarks = (attempt.answers || []).reduce((sum, a) => sum + a.maxMarks, 0);
+    const attemptPercentage = attemptMaxMarks > 0 ? Math.round((attemptMarks / attemptMaxMarks) * 1000) / 10 : 0;
+
+    // Process each question answered in this attempt
+    for (const ans of attempt.answers || []) {
+      if (ans.marks === undefined) continue;
+
+      if (!masteryMap.has(ans.questionId)) {
+        masteryMap.set(ans.questionId, {
+          questionId: ans.questionId,
+          questionText: ans.questionSnapshot?.questionText || exam.questionSnapshots?.[ans.questionId]?.questionText || "",
+          module: ans.questionSnapshot?.module || exam.questionSnapshots?.[ans.questionId]?.module || "General",
+          feature: ans.questionSnapshot?.feature || exam.questionSnapshots?.[ans.questionId]?.feature || "General",
+          maxMarks: ans.maxMarks || 10,
+          bestMarks: 0,
+          isMastered: false,
+          timesAttempted: 0,
+          timesIncorrect: 0,
+          progression: [],
+          latestAttemptNumber: 0,
+        });
+      }
+
+      const rec = masteryMap.get(ans.questionId)!;
+      if (!rec.questionText && ans.questionSnapshot?.questionText) {
+        rec.questionText = ans.questionSnapshot.questionText;
+        rec.module = ans.questionSnapshot.module || rec.module;
+        rec.feature = ans.questionSnapshot.feature || rec.feature;
+      }
+      rec.maxMarks = ans.maxMarks || rec.maxMarks || 10;
+      rec.timesAttempted += 1;
+      rec.latestAttemptNumber = attempt.attemptNumber;
+      rec.latestMarks = ans.marks;
+      if (ans.knowledgeGapCategory) {
+        rec.knowledgeGapCategory = ans.knowledgeGapCategory;
+      }
+
+      const passThreshold = rec.maxMarks * 0.70;
+      const isPassing = ans.marks >= passThreshold;
+      const state: "correct" | "improvement" | "incorrect" = isPassing
+        ? "correct"
+        : ans.marks > 0
+        ? "improvement"
+        : "incorrect";
+
+      if (state !== "correct") {
+        rec.timesIncorrect += 1;
+      }
+      rec.progression.push(state);
+
+      // NON-DECREASING MASTERY RULE:
+      // Question retains the highest score achieved across the chain.
+      // Once mastered (>= 70% or full marks), it remains mastered.
+      if (ans.marks >= rec.bestMarks) {
+        rec.bestMarks = ans.marks;
+        rec.sourceAttemptNumber = attempt.attemptNumber;
+      }
+      if (rec.bestMarks >= passThreshold) {
+        rec.isMastered = true;
+      }
+    }
+
+    // Cumulative Master Score at this attempt
+    let cumulativeScore = 0;
+    for (const rec of masteryMap.values()) {
+      cumulativeScore += rec.bestMarks;
+    }
+
+    const cumulativePercentage = masterTotalMarks > 0 ? Math.round((cumulativeScore / masterTotalMarks) * 1000) / 10 : 0;
+    const progressGain = Math.max(0, cumulativeScore - previousMasterScore);
+
+    let questionsMasteredSoFar = 0;
+    for (const rec of masteryMap.values()) {
+      if (rec.isMastered) questionsMasteredSoFar += 1;
+    }
+
+    const totalQuestionsCount = Math.max(uniqueQuestionIds.length, masteryMap.size);
+    const questionsRemaining = Math.max(0, totalQuestionsCount - questionsMasteredSoFar);
+
+    progressionSteps.push({
+      attemptId: attempt.id,
+      attemptNumber: attempt.attemptNumber,
+      isReattempt: Boolean(attempt.isReattempt || attempt.attemptNumber > 1),
+      status: attempt.status,
+      submittedAt: attempt.submittedAt,
+      reviewedAt: attempt.reviewedAt,
+      timeTakenSeconds: attempt.timeTakenSeconds,
+      attemptMarks,
+      attemptMaxMarks,
+      attemptPercentage,
+      attemptScore: attemptPercentage,
+      rawAttemptMarks: attemptMarks,
+      rawAttemptMaxMarks: attemptMaxMarks,
+      rawAttemptPercentage: attemptPercentage,
+      cumulativeMasterScore: cumulativeScore,
+      masterTotalMarks,
+      cumulativePercentage,
+      progressGain,
+      questionsMasteredSoFar,
+      questionsRemaining,
+    });
+
+    previousMasterScore = cumulativeScore;
+  }
+
+  const currentMasterScore = previousMasterScore;
+  const masterPercentage = masterTotalMarks > 0 ? Math.round((currentMasterScore / masterTotalMarks) * 1000) / 10 : 0;
+
+  let questionsMastered = 0;
+  for (const rec of masteryMap.values()) {
+    if (rec.isMastered) questionsMastered += 1;
+  }
+
+  const totalQuestions = Math.max(uniqueQuestionIds.length, masteryMap.size);
+  const questionsRemaining = Math.max(0, totalQuestions - questionsMastered);
+
+  const isCompleted =
+    exam.mode === "until_perfect"
+      ? (currentMasterScore >= masterTotalMarks && masterTotalMarks > 0)
+      : (reviewedAttempts.length > 0);
+
+  const latestAttemptGain =
+    progressionSteps.length > 0
+      ? progressionSteps[progressionSteps.length - 1].progressGain
+      : 0;
+
+  const latestAttemptNumber =
+    sortedAttempts.length > 0
+      ? Math.max(...sortedAttempts.map((a) => a.attemptNumber || 1))
+      : 1;
+
+  return {
+    examId: exam.id,
+    agentId,
+    examName,
+    masterTotalMarks,
+    currentMasterScore,
+    masterPercentage,
+    totalQuestions,
+    questionsMastered,
+    questionsRemaining,
+    attemptsCount: sortedAttempts.length,
+    reviewedAttemptsCount: reviewedAttempts.length,
+    latestAttemptNumber,
+    isCompleted,
+    latestAttemptGain,
+    progression: progressionSteps,
+    questionMastery: Array.from(masteryMap.values()),
+  };
+}
+
+/* =========================================================
+   BACKWARD COMPATIBILITY: MERGE SCORECARDS WRAPPER
    ========================================================= */
 
 export interface MergedAnswerRecord {
@@ -1151,54 +1395,48 @@ export interface MergedScorecard {
 }
 
 /**
- * Computes a unified scorecard for an agent across all historical attempts for an exam.
- * Reattempt answers override earlier scores for the reattempted questions, while questions
- * passed in earlier attempts are preserved at their historical marks.
+ * Backwards-compatible wrapper that now utilizes the authoritative master score engine.
+ * Ensures the original master denominator is preserved and scores do not regresses.
  */
 export function computeMergedScorecard(
   exam: Exam,
   attempts: ExamAttempt[]
 ): MergedScorecard | null {
-  const reviewedAttempts = attempts
-    .filter((a) => a.status === "reviewed")
-    .sort((a, b) => a.attemptNumber - b.attemptNumber);
+  const reviewedAttempts = attempts.filter((a) => a.status === "reviewed");
+  if (reviewedAttempts.length === 0) return null;
 
-  if (reviewedAttempts.length === 0) {
-    return null;
-  }
+  const master = computeExamMasterScorecard(exam, attempts);
 
-  const answerMap = new Map<string, MergedAnswerRecord>();
-
-  // Iterate chronologically so later attempts update the question's final grade
-  for (const attempt of reviewedAttempts) {
-    for (const ans of attempt.answers) {
-      if (ans.marks !== undefined) {
-        answerMap.set(ans.questionId, {
-          questionId: ans.questionId,
-          questionSnapshot: ans.questionSnapshot || exam.questionSnapshots?.[ans.questionId],
-          agentAnswer: ans.agentAnswer,
-          marks: ans.marks,
-          maxMarks: ans.maxMarks,
-          comments: ans.comments,
-          sourceAttemptNumber: attempt.attemptNumber,
-        });
+  const mergedAnswers: MergedAnswerRecord[] = master.questionMastery.map((q: QuestionMasteryRecord) => {
+    // Find latest answer for agentAnswer and comments
+    let latestAns: AttemptAnswer | undefined;
+    for (const a of [...reviewedAttempts].reverse()) {
+      const match = a.answers?.find((ans) => ans.questionId === q.questionId);
+      if (match) {
+        latestAns = match;
+        break;
       }
     }
-  }
 
-  const mergedAnswers = Array.from(answerMap.values());
-  const totalMarks = mergedAnswers.reduce((sum, a) => sum + (a.marks ?? 0), 0);
-  const maxTotalMarks = mergedAnswers.reduce((sum, a) => sum + a.maxMarks, 0);
-  const percentage = maxTotalMarks > 0 ? Math.round((totalMarks / maxTotalMarks) * 100) : 0;
+    return {
+      questionId: q.questionId,
+      questionSnapshot: exam.questionSnapshots?.[q.questionId] || latestAns?.questionSnapshot,
+      agentAnswer: latestAns?.agentAnswer || "",
+      marks: q.bestMarks,
+      maxMarks: q.maxMarks,
+      comments: latestAns?.comments,
+      sourceAttemptNumber: q.latestAttemptNumber || 1,
+    };
+  });
 
   return {
     examId: exam.id,
-    agentId: reviewedAttempts[0].agentId,
-    totalMarks,
-    maxTotalMarks,
-    percentage,
-    attemptsCount: reviewedAttempts.length,
-    latestAttemptNumber: reviewedAttempts[reviewedAttempts.length - 1].attemptNumber,
+    agentId: master.agentId,
+    totalMarks: master.currentMasterScore,
+    maxTotalMarks: master.masterTotalMarks,
+    percentage: master.masterPercentage,
+    attemptsCount: master.reviewedAttemptsCount,
+    latestAttemptNumber: master.latestAttemptNumber,
     mergedAnswers,
   };
 }

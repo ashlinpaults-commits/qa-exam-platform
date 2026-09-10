@@ -7,6 +7,7 @@ import {
   saveReviewDraft,
   finalizeReview,
   computeMergedScorecard,
+  computeExamMasterScorecard,
   MergedScorecard,
 } from "@/lib/attempts";
 import { getQuestionsByIds } from "@/lib/questions";
@@ -68,7 +69,7 @@ export function ReviewScreen() {
     text: string;
   } | null>(null);
 
-  // Amend Scorecard & Merged Scorecard State
+  // Amend Scorecard & Master Scorecard State
   const [amendingAttempt, setAmendingAttempt] = useState<ExamAttempt | null>(null);
   const [viewingMergedAgentId, setViewingMergedAgentId] = useState<string | null>(null);
 
@@ -76,6 +77,12 @@ export function ReviewScreen() {
     () => exams.find((e) => e.id === selectedExam),
     [exams, selectedExam]
   );
+
+  const masterScorecardData = useMemo(() => {
+    if (!viewingMergedAgentId || !selectedExamDoc) return null;
+    const agentAttempts = attempts.filter((a) => a.agentId === viewingMergedAgentId);
+    return computeExamMasterScorecard(selectedExamDoc, agentAttempts);
+  }, [viewingMergedAgentId, selectedExamDoc, attempts]);
 
   const mergedScorecardData = useMemo(() => {
     if (!viewingMergedAgentId || !selectedExamDoc) return null;
@@ -366,10 +373,10 @@ export function ReviewScreen() {
                           e.stopPropagation();
                           setViewingMergedAgentId(attempt.agentId);
                         }}
-                        title="View consolidated best/latest scorecard across attempts"
+                        title="View Master Scorecard and attempt progression"
                       >
                         <Layers className="h-3 w-3" />
-                        Consolidated Score
+                        Master Scorecard
                       </button>
                     )}
 
@@ -615,66 +622,120 @@ export function ReviewScreen() {
         />
       )}
 
-      {/* Merged / Consolidated Scorecard Modal */}
+      {/* Master Scorecard & Attempt Progression Modal */}
       <Modal
         open={!!viewingMergedAgentId}
         onClose={() => setViewingMergedAgentId(null)}
-        title={`Consolidated Scorecard — ${userName(viewingMergedAgentId || "")}`}
+        title={`Exam Master Scorecard & Progression — ${userName(viewingMergedAgentId || "")}`}
         wide
       >
-        {mergedScorecardData && (
+        {masterScorecardData && (
           <div className="space-y-4 text-xs">
             {/* Summary Metrics */}
-            <div className="flex items-center justify-between rounded-xl border border-brand-200 bg-brand-50/50 p-4 dark:border-brand-800/60 dark:bg-brand-950/20">
+            <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-brand-200 bg-brand-50/50 p-4 dark:border-brand-800/60 dark:bg-brand-950/20">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-300">
-                  Consolidated Best/Latest Score
+                  Exam Master Score
                 </p>
                 <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100">
-                  {mergedScorecardData.totalMarks} / {mergedScorecardData.maxTotalMarks}{" "}
-                  <span className="text-base font-medium text-brand-600">({mergedScorecardData.percentage}%)</span>
+                  {masterScorecardData.currentMasterScore} / {masterScorecardData.masterTotalMarks}{" "}
+                  <span className="text-base font-medium text-brand-600">({masterScorecardData.masterPercentage}%)</span>
+                </p>
+                <p className="mt-0.5 text-[11px] text-slate-500">
+                  {masterScorecardData.questionsMastered} / {selectedExamDoc?.questions.length ?? 0} questions mastered across progressive attempts
                 </p>
               </div>
               <div className="text-right">
-                <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold shadow-sm dark:border-slate-700 dark:bg-slate-800">
-                  Merged across {mergedScorecardData.attemptsCount} attempts
+                <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold shadow-sm dark:border-slate-700 dark:bg-slate-800">
+                  {masterScorecardData.reviewedAttemptsCount} reviewed attempt{masterScorecardData.reviewedAttemptsCount === 1 ? "" : "s"}
                 </span>
+                {masterScorecardData.isCompleted && (
+                  <p className="mt-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                    ✓ Exam Requirement Completed
+                  </p>
+                )}
               </div>
             </div>
 
-            {/* Answer List */}
-            <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
-              {mergedScorecardData.mergedAnswers.map((ans, idx) => (
-                <div key={ans.questionId} className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
-                  <div className="mb-1 flex items-center justify-between gap-2">
-                    <span className="font-mono font-bold text-slate-500">#{idx + 1}</span>
-                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                      Sourced from Attempt #{ans.sourceAttemptNumber}
-                    </span>
-                    <span
-                      className={`ml-auto font-bold ${
-                        (ans.marks ?? 0) >= ans.maxMarks ? "text-emerald-600" : "text-amber-600"
-                      }`}
-                    >
-                      {ans.marks ?? 0} / {ans.maxMarks} marks
-                    </span>
-                  </div>
-                  <p className="mb-1 line-clamp-2 font-medium text-slate-800 dark:text-slate-200">
-                    {ans.questionSnapshot?.questionText ||
-                      selectedExamDoc?.questionSnapshots?.[ans.questionId]?.questionText ||
-                      questionCache[ans.questionId]?.questionText ||
-                      `Question #${idx + 1}`}
-                  </p>
-                  <p className="text-[11px] text-slate-500">
-                    <strong>Agent Answer:</strong> {ans.agentAnswer || "(empty)"}
-                  </p>
-                  {ans.comments && (
-                    <p className="mt-0.5 text-[11px] text-brand-600">
-                      <strong>Auditor Comment:</strong> {ans.comments}
-                    </p>
-                  )}
+            {/* Progression Steps Strip */}
+            {masterScorecardData.progression.length > 1 && (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/40">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-2">
+                  Attempt Progression History
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  {masterScorecardData.progression.map((step, idx) => (
+                    <div key={step.attemptId} className="flex items-center gap-2">
+                      <div className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-800 shadow-sm">
+                        <span className="font-bold text-slate-800 dark:text-slate-200">Attempt #{step.attemptNumber}</span>
+                        {step.isReattempt && (
+                          <span className="ml-1.5 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+                            Retake
+                          </span>
+                        )}
+                        <span className="text-slate-400 mx-1.5">|</span>
+                        <span className="font-bold text-slate-800 dark:text-slate-200">
+                          Current Score: {step.cumulativePercentage}% ({step.cumulativeMasterScore} / {step.masterTotalMarks})
+                        </span>
+                        {step.progressGain !== null && (
+                          <span className="ml-1.5 font-semibold text-emerald-600 dark:text-emerald-400">
+                            (+{step.progressGain} pts)
+                          </span>
+                        )}
+                        {step.isReattempt && (
+                          <>
+                            <span className="text-slate-400 mx-1.5">|</span>
+                            <span className="text-slate-500">
+                              This Attempt: {step.attemptMarks} / {step.attemptMaxMarks} ({step.attemptPercentage}%)
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      {idx < masterScorecardData.progression.length - 1 && (
+                        <span className="text-slate-400 font-bold">→</span>
+                      )}
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </div>
+            )}
+
+            {/* Mastered Questions List */}
+            <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+              {masterScorecardData.questionMastery.map((rec, idx) => {
+                const qSnapshot = selectedExamDoc?.questionSnapshots?.[rec.questionId];
+                const qCached = questionCache[rec.questionId];
+                const qText = qSnapshot?.questionText || qCached?.questionText || `Question #${idx + 1}`;
+                return (
+                  <div key={rec.questionId} className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="font-mono font-bold text-slate-500">#{idx + 1}</span>
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        {rec.sourceAttemptNumber ? `Best from Attempt #${rec.sourceAttemptNumber}` : "Not attempted"}
+                      </span>
+                      {rec.isMastered ? (
+                        <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
+                          Mastered
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10px] font-semibold text-rose-700 dark:bg-rose-950/60 dark:text-rose-300">
+                          Unmastered
+                        </span>
+                      )}
+                      <span
+                        className={`ml-auto font-bold ${
+                          rec.isMastered ? "text-emerald-600" : "text-amber-600"
+                        }`}
+                      >
+                        {rec.bestMarks} / {rec.maxMarks} marks
+                      </span>
+                    </div>
+                    <p className="mb-1 line-clamp-2 font-medium text-slate-800 dark:text-slate-200">
+                      {qText}
+                    </p>
+                  </div>
+                );
+              })}
             </div>
 
             <div className="flex justify-end border-t border-slate-100 pt-2 dark:border-slate-800">

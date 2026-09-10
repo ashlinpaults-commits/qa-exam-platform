@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { getExam } from "@/lib/exams";
-import { fetchAttemptsForExam } from "@/lib/attempts";
+import { fetchAttemptsForExam, computeExamMasterScorecard } from "@/lib/attempts";
 import { fetchAllUsers } from "@/lib/users";
 import { RoleGate } from "@/components/auth/RoleGate";
 import { AppShell } from "@/components/layout/AppShell";
@@ -60,97 +60,101 @@ export default function ReportPage({
     load();
   }, [params.examId]);
 
-  const reviewedAttempts =
-    useMemo(
-      () =>
-        attempts.filter(
-          (a) => a.status === "reviewed"
-        ),
-      [attempts]
+  const agentRows = useMemo(() => {
+    if (!exam) return [];
+
+    return users
+      .filter((user) =>
+        exam.assignedAgentIds.includes(
+          user.uid
+        )
+      )
+      .map((user) => {
+        const agentAttempts =
+          attempts.filter(
+            (a) =>
+              a.agentId === user.uid
+          );
+
+        const latestAttempt =
+          agentAttempts
+            .filter(
+              (a) =>
+                a.status === "reviewed"
+            )
+            .sort(
+              (a, b) =>
+                (b.reviewedAt ?? 0) -
+                (a.reviewedAt ?? 0)
+            )[0];
+
+        const masterScorecard =
+          computeExamMasterScorecard(
+            exam,
+            agentAttempts
+          );
+
+        return {
+          user,
+          latestAttempt,
+          attempts:
+            agentAttempts.length,
+          masterScorecard,
+        };
+      });
+  }, [exam, users, attempts]);
+
+  const agentsWithReviewedScore = useMemo(
+    () =>
+      agentRows.filter(
+        (row) =>
+          row.masterScorecard &&
+          row.masterScorecard.reviewedAttemptsCount > 0
+      ),
+    [agentRows]
+  );
+
+  const averageScore = useMemo(() => {
+    if (!agentsWithReviewedScore.length)
+      return 0;
+
+    const total = agentsWithReviewedScore.reduce(
+      (sum, row) =>
+        sum +
+        (row.masterScorecard?.masterPercentage ?? 0),
+      0
     );
 
-  const averageScore =
-    useMemo(() => {
-      if (!reviewedAttempts.length)
-        return 0;
+    return Math.round(
+      total / agentsWithReviewedScore.length
+    );
+  }, [agentsWithReviewedScore]);
 
-      const total =
-        reviewedAttempts.reduce(
-          (sum, attempt) =>
-            sum +
-            ((attempt.totalMarks ?? 0) /
-              (attempt.maxTotalMarks ||
-                1)) *
-              100,
-          0
-        );
+  const highestScore = useMemo(() => {
+    if (!agentsWithReviewedScore.length)
+      return 0;
 
-      return Math.round(
-        total /
-          reviewedAttempts.length
-      );
-    }, [reviewedAttempts]);
-
-  const highestScore =
-    useMemo(() => {
-      if (!reviewedAttempts.length)
-        return 0;
-
-      return Math.max(
-        ...reviewedAttempts.map((a) =>
-          Math.round(
-            ((a.totalMarks ?? 0) /
-              (a.maxTotalMarks ||
-                1)) *
-              100
-          )
-        )
-      );
-    }, [reviewedAttempts]);
-
-  const completed =
-    reviewedAttempts.length;
-
-  const pending =
-    attempts.filter(
-      (a) =>
-        a.status === "submitted" ||
-        a.status ===
-          "review_in_progress"
-    ).length;
-
-  const agentRows = users
-    .filter((user) =>
-      exam?.assignedAgentIds.includes(
-        user.uid
+    return Math.max(
+      ...agentsWithReviewedScore.map(
+        (row) =>
+          row.masterScorecard?.masterPercentage ?? 0
       )
-    )
-    .map((user) => {
-      const agentAttempts =
-        attempts.filter(
-          (a) =>
-            a.agentId === user.uid
-        );
+    );
+  }, [agentsWithReviewedScore]);
 
-      const latestAttempt =
-        agentAttempts
-          .filter(
-            (a) =>
-              a.status === "reviewed"
-          )
-          .sort(
-            (a, b) =>
-              (b.reviewedAt ?? 0) -
-              (a.reviewedAt ?? 0)
-          )[0];
+  const completed = useMemo(
+    () =>
+      agentRows.filter(
+        (row) => row.masterScorecard?.isCompleted
+      ).length,
+    [agentRows]
+  );
 
-      return {
-        user,
-        latestAttempt,
-        attempts:
-          agentAttempts.length,
-      };
-    });
+  const pending = attempts.filter(
+    (a) =>
+      a.status === "submitted" ||
+      a.status === "review_in_progress"
+  ).length;
 
   if (loading) {
     return (

@@ -353,3 +353,70 @@ export interface ExamAttempt {
   // more than once for the same attempt.
   analyticsFinalized?: boolean;
 }
+
+/* =========================================================
+   PROGRESSIVE MASTER SCORING MODEL
+   ========================================================= */
+
+export interface QuestionMasteryRecord {
+  questionId: string;
+  questionText: string;
+  module: string;
+  feature: string;
+  maxMarks: number;
+  bestMarks: number;
+  isMastered: boolean;
+  timesAttempted: number;
+  timesIncorrect: number;
+  progression: ("correct" | "improvement" | "incorrect")[];
+  latestAttemptNumber: number;
+  sourceAttemptNumber?: number;
+  latestMarks?: number;
+  knowledgeGapCategory?: KnowledgeGapCategory;
+}
+
+export interface AttemptProgressionStep {
+  attemptId: string;
+  attemptNumber: number;
+  isReattempt: boolean;
+  status: ExamAttempt["status"];
+  submittedAt?: number;
+  reviewedAt?: number;
+  timeTakenSeconds?: number;
+
+  // Attempt score in isolation (raw attempt performance)
+  attemptMarks: number;
+  attemptMaxMarks: number;
+  attemptPercentage: number;
+  attemptScore?: number; // Alias for attemptPercentage
+  rawAttemptMarks?: number;
+  rawAttemptMaxMarks?: number;
+  rawAttemptPercentage?: number;
+
+  // Master cumulative progression
+  cumulativeMasterScore: number;
+  masterTotalMarks: number;
+  cumulativePercentage: number;
+  progressGain: number;
+  questionsMasteredSoFar: number;
+  questionsRemaining: number;
+}
+
+export interface ExamMasterScorecard {
+  examId: string;
+  agentId: string;
+  examName: string;
+  masterTotalMarks: number;
+  currentMasterScore: number;
+  masterPercentage: number;
+  totalQuestions: number;
+  questionsMastered: number;
+  questionsRemaining: number;
+  attemptsCount: number;
+  reviewedAttemptsCount: number;
+  latestAttemptNumber: number;
+  isCompleted: boolean;
+  latestAttemptGain: number;
+  progression: AttemptProgressionStep[];
+  questionMastery: QuestionMasteryRecord[];
+}

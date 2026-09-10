@@ -5,6 +5,9 @@ import type {
   ExamAttempt,
   Question,
   KnowledgeGapCategory,
+  ExamMasterScorecard,
+  AttemptProgressionStep,
+  QuestionMasteryRecord,
 } from "@/types";
 import {
   calculateAgentCompetency,
@@ -16,7 +19,7 @@ import {
   type AgentCoachingAssessment,
   type LearningTrend,
 } from "./competency";
-import { computeMergedScorecard } from "./attempts";
+import { computeMergedScorecard, computeExamMasterScorecard } from "./attempts";
 
 /* =========================================================
    REPORT TYPES & DATA STRUCTURES
@@ -53,8 +56,17 @@ export interface AgentAttemptRecord {
   attemptNumber: number;
   score: number | null;
   percentage: number | null;
+  attemptScore?: number | null;
   totalMarks: number | null;
   maxTotalMarks: number | null;
+  cumulativeMasterScore?: number | null;
+  masterTotalMarks?: number | null;
+  cumulativePercentage?: number | null;
+  progressGain?: number | null;
+  questionsMastered?: number | null;
+  rawAttemptMarks?: number | null;
+  rawAttemptMaxMarks?: number | null;
+  rawAttemptScore?: number | null;
   timeTakenSeconds?: number;
   submittedAt?: number;
   reviewedAt?: number;
@@ -80,10 +92,17 @@ export interface AgentExamPerformance {
   totalMarks: number | null;
   maxMarks: number | null;
   percentage: number | null;
+  masterScore: number | null;
+  masterTotalMarks: number | null;
+  masterPercentage: number | null;
+  latestAttemptGain: number | null;
+  questionsMastered: number;
+  questionsRemaining: number;
   timeTakenSeconds: number | null;
   reviewStatus: "Reviewed" | "Awaiting Review" | "In Progress" | "Not Attempted";
   completionStatus: "Completed" | "Pending" | "Not Attempted";
   attempts: AgentAttemptRecord[];
+  masterScorecard: ExamMasterScorecard | null;
   mergedScorecard: ReturnType<typeof computeMergedScorecard>;
 }
 
@@ -100,6 +119,8 @@ export interface AgentMissedQuestion {
   latestScore: number;
   latestMaxMarks: number;
   knowledgeGapCategory?: KnowledgeGapCategory;
+  eventuallyMastered: boolean;
+  progressionDisplay: string;
 }
 
 export interface ScoreProgressionPoint {
@@ -210,6 +231,8 @@ export function buildAgentPerformanceReport({
     return a.name.localeCompare(b.name);
   });
 
+  const attemptProgressionStepMap = new Map<string, AttemptProgressionStep>();
+
   const examPerformances: AgentExamPerformance[] = allRelevantExams.map((exam) => {
     const isArchived = exam.status === "archived";
     const examAttempts = agentAttempts
@@ -220,17 +243,12 @@ export function buildAgentPerformanceReport({
     const latestAttempt = examAttempts[examAttempts.length - 1];
     const latestReviewed = reviewedAttempts[reviewedAttempts.length - 1];
 
+    // Authoritative Master Scorecard
+    const masterScorecard = computeExamMasterScorecard(exam, examAttempts);
+    masterScorecard.progression.forEach((step) => attemptProgressionStepMap.set(step.attemptId, step));
+
     // Compute mode-aware completion status matching ExamResultsScreen
-    let completed = false;
-    if (exam.mode === "until_perfect") {
-      completed = Boolean(
-        latestReviewed &&
-          latestReviewed.maxTotalMarks &&
-          latestReviewed.totalMarks === latestReviewed.maxTotalMarks
-      );
-    } else {
-      completed = reviewedAttempts.length > 0;
-    }
+    const completed = masterScorecard.isCompleted;
 
     // Determine review status
     let reviewStatus: AgentExamPerformance["reviewStatus"] = "Not Attempted";
@@ -254,7 +272,7 @@ export function buildAgentPerformanceReport({
         ? "Pending"
         : "Not Attempted";
 
-    // Attempt scores
+    // Attempt scores (in isolation)
     const reviewedPercentages = reviewedAttempts
       .map((a) => getAttemptScorePercentage(a))
       .filter((p): p is number => p !== null);
@@ -274,13 +292,18 @@ export function buildAgentPerformanceReport({
           )
         : null;
 
-    // Unified Merged Scorecard across reattempts
-    const merged = computeMergedScorecard(exam, examAttempts);
+    // Master Score & Master Total Marks
+    const masterScore = masterScorecard.reviewedAttemptsCount > 0 ? masterScorecard.currentMasterScore : null;
+    const masterTotalMarks = masterScorecard.masterTotalMarks;
+    const masterPercentage = masterScorecard.reviewedAttemptsCount > 0 ? masterScorecard.masterPercentage : null;
+    const latestAttemptGain = masterScorecard.latestAttemptGain;
+    const questionsMastered = masterScorecard.questionsMastered;
+    const questionsRemaining = masterScorecard.questionsRemaining;
 
-    // Total marks & percentage from merged scorecard or latest reviewed
-    const totalMarks = merged ? merged.totalMarks : (latestReviewed?.totalMarks ?? null);
-    const maxMarks = merged ? merged.maxTotalMarks : (latestReviewed?.maxTotalMarks ?? null);
-    const percentage = merged ? merged.percentage : latestAttemptScore;
+    // Backward-compatible aliases
+    const totalMarks = masterScore;
+    const maxMarks = masterTotalMarks;
+    const percentage = masterPercentage;
 
     // Average time taken across completed attempts
     const validTimes = examAttempts
@@ -292,15 +315,34 @@ export function buildAgentPerformanceReport({
         : null;
 
     const attemptRecords: AgentAttemptRecord[] = examAttempts.map((a) => {
-      const pct = getAttemptScorePercentage(a);
+      const rawPct = getAttemptScorePercentage(a);
+      const step = masterScorecard.progression.find(
+        (p: AttemptProgressionStep) => p.attemptId === a.id || p.attemptNumber === a.attemptNumber
+      );
+
+      // In this progressive model, an attempt's score MUST represent the agent's
+      // CURRENT MASTER EXAM SCORE at that point in the progression (e.g. 78.6% and 110/140).
+      const currentScorePct = step ? step.cumulativePercentage : rawPct;
+      const currentMarks = step ? step.cumulativeMasterScore : (a.totalMarks ?? null);
+      const currentMaxMarks = masterScorecard.masterTotalMarks > 0 ? masterScorecard.masterTotalMarks : (a.maxTotalMarks ?? null);
+
       return {
         id: a.id,
         examId: a.examId,
         attemptNumber: a.attemptNumber,
-        score: pct,
-        percentage: pct,
-        totalMarks: a.totalMarks ?? null,
-        maxTotalMarks: a.maxTotalMarks ?? null,
+        score: currentScorePct,
+        percentage: currentScorePct,
+        attemptScore: currentScorePct,
+        totalMarks: currentMarks,
+        maxTotalMarks: currentMaxMarks,
+        cumulativeMasterScore: step?.cumulativeMasterScore ?? null,
+        masterTotalMarks: masterScorecard.masterTotalMarks,
+        cumulativePercentage: step?.cumulativePercentage ?? null,
+        progressGain: step?.progressGain ?? null,
+        questionsMastered: step?.questionsMasteredSoFar ?? null,
+        rawAttemptMarks: a.totalMarks ?? null,
+        rawAttemptMaxMarks: a.maxTotalMarks ?? null,
+        rawAttemptScore: rawPct,
         timeTakenSeconds: a.timeTakenSeconds,
         submittedAt: a.submittedAt,
         reviewedAt: a.reviewedAt,
@@ -310,6 +352,8 @@ export function buildAgentPerformanceReport({
         isArchivedExam: isArchived,
       };
     });
+
+    const merged = computeMergedScorecard(exam, examAttempts);
 
     return {
       examId: exam.id,
@@ -327,10 +371,17 @@ export function buildAgentPerformanceReport({
       totalMarks,
       maxMarks,
       percentage,
+      masterScore,
+      masterTotalMarks,
+      masterPercentage,
+      latestAttemptGain,
+      questionsMastered,
+      questionsRemaining,
       timeTakenSeconds,
       reviewStatus,
       completionStatus,
       attempts: attemptRecords,
+      masterScorecard,
       mergedScorecard: merged,
     };
   });
@@ -359,53 +410,53 @@ export function buildAgentPerformanceReport({
   const allReviewedAttempts = agentAttempts.filter((a) => a.status === "reviewed");
   const reviewedAttemptsCount = allReviewedAttempts.length;
 
-  const allReviewedPercentages = allReviewedAttempts
-    .map((a) => getAttemptScorePercentage(a))
-    .filter((p): p is number => p !== null);
+  // Eligible non-archived reviewed exams for Master Score aggregation
+  const eligibleReviewedExams = examPerformances.filter(
+    (p) => !p.isArchived && p.masterScorecard && p.masterScorecard.reviewedAttemptsCount > 0
+  );
 
-  const averageScore =
-    allReviewedPercentages.length > 0
-      ? round(
-          allReviewedPercentages.reduce((s, p) => s + p, 0) /
-            allReviewedPercentages.length
-        )
-      : null;
+  const totalMarksEarned = eligibleReviewedExams.reduce(
+    (sum, p) => sum + (p.masterScore ?? 0),
+    0
+  );
 
-  const highestScore =
-    allReviewedPercentages.length > 0 ? Math.max(...allReviewedPercentages) : null;
-  const lowestScore =
-    allReviewedPercentages.length > 0 ? Math.min(...allReviewedPercentages) : null;
-
-  // Question-level answers from eligible reviewed attempts
-  let totalQuestionsAttempted = 0;
-  let correctAnswers = 0;
-  let incorrectAnswers = 0;
-  let totalMarksEarned = 0;
-  let totalPossibleMarks = 0;
-
-  // Calculate question metrics using the platform standard (>= 70% is correct)
-  for (const attempt of allReviewedAttempts) {
-    for (const ans of attempt.answers || []) {
-      if (ans.marks === undefined) continue;
-      totalQuestionsAttempted++;
-      totalMarksEarned += ans.marks;
-      totalPossibleMarks += ans.maxMarks;
-
-      const pct = getAnswerPercentage(ans);
-      if (pct !== null && pct >= COMPETENCY_THRESHOLDS.correctAnswerPct) {
-        correctAnswers++;
-      } else {
-        incorrectAnswers++;
-      }
-    }
-  }
+  const totalPossibleMarks = eligibleReviewedExams.reduce(
+    (sum, p) => sum + (p.masterTotalMarks ?? 0),
+    0
+  );
 
   // Cross-Exam Overall Score Calculation:
-  // Formula: (Total Marks Earned Across Eligible Reviewed Attempts / Total Possible Marks) * 100
+  // Formula: Total Master Marks Earned Across Eligible Reviewed Exams / Total Master Possible Marks * 100
   const overallScore =
     totalPossibleMarks > 0
       ? round((totalMarksEarned / totalPossibleMarks) * 100)
       : null;
+
+  const masterPercentages = eligibleReviewedExams
+    .map((p) => p.masterPercentage)
+    .filter((p): p is number => p !== null);
+
+  const averageScore =
+    masterPercentages.length > 0
+      ? round(masterPercentages.reduce((s, p) => s + p, 0) / masterPercentages.length)
+      : null;
+
+  const highestScore =
+    masterPercentages.length > 0 ? Math.max(...masterPercentages) : null;
+  const lowestScore =
+    masterPercentages.length > 0 ? Math.min(...masterPercentages) : null;
+
+  // Question-level metrics across unique questions in eligible reviewed exams
+  let totalQuestionsAttempted = 0;
+  let correctAnswers = 0;
+  eligibleReviewedExams.forEach((p) => {
+    if (p.masterScorecard) {
+      const attempted = p.masterScorecard.questionMastery.filter((q) => q.timesAttempted > 0).length;
+      totalQuestionsAttempted += attempted;
+      correctAnswers += p.masterScorecard.questionsMastered;
+    }
+  });
+  const incorrectAnswers = Math.max(0, totalQuestionsAttempted - correctAnswers);
 
   // Average Time Taken across all submitted attempts
   const allTimeTakens = agentAttempts
@@ -457,16 +508,17 @@ export function buildAgentPerformanceReport({
       questionSnapshot?: Question;
       timesAttempted: number;
       timesIncorrect: number;
-      latestAnswerTimestamp: number;
+      bestMarks: number;
       latestMarks: number;
       latestMaxMarks: number;
       latestCategory?: KnowledgeGapCategory;
+      latestResult: "Correct" | "Incorrect";
+      progressionStates: string[];
     }
   >();
 
   // Iterate chronologically through eligible reviewed attempts
   for (const attempt of allReviewedAttempts) {
-    const attemptTime = attempt.reviewedAt || attempt.submittedAt || attempt.startedAt;
     const examSnapshots = examMap.get(attempt.examId)?.questionSnapshots;
 
     for (const ans of attempt.answers || []) {
@@ -477,25 +529,27 @@ export function buildAgentPerformanceReport({
         questionSnapshot: ans.questionSnapshot || examSnapshots?.[ans.questionId] || questionMap.get(ans.questionId),
         timesAttempted: 0,
         timesIncorrect: 0,
-        latestAnswerTimestamp: 0,
+        bestMarks: 0,
         latestMarks: 0,
         latestMaxMarks: ans.maxMarks || 10,
+        latestResult: "Incorrect" as const,
         latestCategory: ans.knowledgeGapCategory,
+        progressionStates: [],
       };
 
       existing.timesAttempted += 1;
-      const isIncorrect = (ans.marks / (ans.maxMarks || 10)) < 0.70;
-      if (isIncorrect) {
+      const maxMarks = ans.maxMarks || 10;
+      const isCorrect = (ans.marks / maxMarks) >= 0.70;
+      if (!isCorrect) {
         existing.timesIncorrect += 1;
       }
-
-      if (attemptTime >= existing.latestAnswerTimestamp) {
-        existing.latestAnswerTimestamp = attemptTime;
-        existing.latestMarks = ans.marks;
-        existing.latestMaxMarks = ans.maxMarks || 10;
-        if (ans.knowledgeGapCategory) {
-          existing.latestCategory = ans.knowledgeGapCategory;
-        }
+      existing.progressionStates.push(isCorrect ? "Correct" : "Incorrect");
+      existing.bestMarks = Math.max(existing.bestMarks, ans.marks);
+      existing.latestMarks = ans.marks;
+      existing.latestMaxMarks = maxMarks;
+      existing.latestResult = isCorrect ? "Correct" : "Incorrect";
+      if (ans.knowledgeGapCategory) {
+        existing.latestCategory = ans.knowledgeGapCategory;
       }
 
       questionHistoryMap.set(ans.questionId, existing);
@@ -507,7 +561,8 @@ export function buildAgentPerformanceReport({
     .map((record) => {
       const q = record.questionSnapshot || questionMap.get(record.questionId);
       const incorrectPct = Math.round((record.timesIncorrect / record.timesAttempted) * 100);
-      const isLatestCorrect = record.latestMaxMarks > 0 && (record.latestMarks / record.latestMaxMarks) >= 0.70;
+      const eventuallyMastered = (record.bestMarks / record.latestMaxMarks) >= 0.70;
+      const progressionDisplay = record.progressionStates.join(" → ");
 
       return {
         questionId: record.questionId,
@@ -518,14 +573,19 @@ export function buildAgentPerformanceReport({
         timesAttempted: record.timesAttempted,
         timesIncorrect: record.timesIncorrect,
         incorrectPct,
-        latestResult: (isLatestCorrect ? "Correct" : "Incorrect") as "Correct" | "Incorrect",
+        latestResult: record.latestResult,
         latestScore: record.latestMarks,
         latestMaxMarks: record.latestMaxMarks,
         knowledgeGapCategory: record.latestCategory,
+        eventuallyMastered,
+        progressionDisplay,
       };
     })
     .sort((a, b) => {
-      // Prioritize repeated misses (>= 2 incorrect)
+      // Prioritize unresolved weaknesses over eventually mastered
+      if (a.eventuallyMastered !== b.eventuallyMastered) {
+        return a.eventuallyMastered ? 1 : -1;
+      }
       if (b.timesIncorrect !== a.timesIncorrect) {
         return b.timesIncorrect - a.timesIncorrect;
       }
@@ -537,7 +597,8 @@ export function buildAgentPerformanceReport({
      --------------------------------------------------------- */
   const progression: ScoreProgressionPoint[] = allReviewedAttempts
     .map((a) => {
-      const scorePct = getAttemptScorePercentage(a);
+      const step = attemptProgressionStepMap.get(a.id);
+      const scorePct = step ? step.cumulativePercentage : (getAttemptScorePercentage(a) ?? 0);
       const examName = examMap.get(a.examId)?.name || "Assessment";
       const timestamp = a.reviewedAt || a.submittedAt || a.startedAt;
       return {
@@ -621,12 +682,15 @@ export function exportAgentReportsToExcel(
         "Exam Status": p.status,
         "Is Archived": p.isArchived ? "Yes" : "No",
         "Attempts Taken": p.attemptsTaken,
-        "Latest Score (%)": p.latestAttemptScore !== null ? `${p.latestAttemptScore}%` : "N/A",
-        "Best Score (%)": p.bestScore !== null ? `${p.bestScore}%` : "N/A",
-        "Average Score (%)": p.averageScore !== null ? `${p.averageScore}%` : "N/A",
-        "Total Marks": p.totalMarks ?? "N/A",
-        "Max Marks": p.maxMarks ?? "N/A",
-        "Unified Percentage (%)": p.percentage !== null ? `${p.percentage}%` : "N/A",
+        "Master Score": p.masterScore !== null ? p.masterScore : "N/A",
+        "Master Total": p.masterTotalMarks,
+        "Master Progress (%)": p.masterPercentage !== null ? `${p.masterPercentage}%` : "N/A",
+        "Latest Attempt Gain": p.latestAttemptGain !== null ? (p.latestAttemptGain > 0 ? `+${p.latestAttemptGain}` : `${p.latestAttemptGain}`) : "N/A",
+        "Questions Mastered": p.questionsMastered,
+        "Questions Remaining": p.questionsRemaining,
+        "Latest Attempt Score (%)": p.latestAttemptScore !== null ? `${p.latestAttemptScore}%` : "N/A",
+        "Best Attempt Score (%)": p.bestScore !== null ? `${p.bestScore}%` : "N/A",
+        "Average Attempt Score (%)": p.averageScore !== null ? `${p.averageScore}%` : "N/A",
         "Average Time": formatTimeTaken(p.timeTakenSeconds),
         "Review Status": p.reviewStatus,
         "Completion Status": p.completionStatus,
@@ -654,12 +718,45 @@ export function exportAgentReportsToExcel(
         "Latest Result": q.latestResult,
         "Latest Score": `${q.latestScore}/${q.latestMaxMarks}`,
         "Knowledge Gap Category": q.knowledgeGapCategory || "Uncategorized",
+        "Progression": q.progressionDisplay || "N/A",
+        "Eventually Mastered": q.eventuallyMastered ? "Yes" : "No",
       });
     });
   });
   if (missedRows.length > 0) {
     const wsMissed = XLSX.utils.json_to_sheet(missedRows);
     XLSX.utils.book_append_sheet(wb, wsMissed, "Frequently Missed Questions");
+  }
+
+  // Sheet 4: Progressive Attempt History
+  const attemptHistoryRows: Record<string, unknown>[] = [];
+  reports.forEach((r) => {
+    r.examPerformances.forEach((p) => {
+      p.attempts.forEach((a) => {
+        attemptHistoryRows.push({
+          "Agent Name": r.agent.name || "Agent",
+          "Agent Email": r.agent.email || "",
+          "Exam Name": p.examName,
+          "Attempt Number": a.attemptNumber,
+          "Type": a.isReattempt ? "Retake" : "Original",
+          "Current Exam Score (%)": a.score !== null ? `${a.score}%` : "N/A",
+          "Master Progress": a.cumulativeMasterScore !== null ? `${a.cumulativeMasterScore} / ${a.masterTotalMarks}` : "N/A",
+          "Progress Gain": a.progressGain !== null && a.progressGain !== undefined ? (a.progressGain > 0 ? `+${a.progressGain}` : `${a.progressGain}`) : "N/A",
+          "This Attempt Score": a.isReattempt && a.rawAttemptMarks !== null && a.rawAttemptMarks !== undefined
+            ? `${a.rawAttemptMarks} / ${a.rawAttemptMaxMarks} (${a.rawAttemptScore ?? "—"}%)`
+            : a.rawAttemptMarks !== null && a.rawAttemptMarks !== undefined
+            ? `${a.rawAttemptMarks} / ${a.rawAttemptMaxMarks} (${a.rawAttemptScore ?? "—"}%)`
+            : "N/A",
+          "Status": a.status,
+          "Time": formatTimeTaken(a.timeTakenSeconds),
+          "Submitted At": a.submittedAt ? new Date(a.submittedAt).toLocaleDateString() : "N/A",
+        });
+      });
+    });
+  });
+  if (attemptHistoryRows.length > 0) {
+    const wsAttempts = XLSX.utils.json_to_sheet(attemptHistoryRows);
+    XLSX.utils.book_append_sheet(wb, wsAttempts, "Attempt History");
   }
 
   // Write file to client browser

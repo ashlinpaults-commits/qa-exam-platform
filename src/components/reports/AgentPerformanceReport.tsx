@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { AgentPerformanceReportData, AgentExamPerformance } from "@/lib/agentReports";
 import { formatTimeTaken, exportAgentReportsToExcel } from "@/lib/agentReports";
+import { exportAgentReportsToPdf } from "@/lib/agentReportPdf";
 import {
   ArrowLeft,
   ArrowUp,
@@ -14,7 +15,8 @@ import {
   ChevronDown,
   ChevronUp,
   FileSpreadsheet,
-  Printer,
+  FileDown,
+  Loader2,
 } from "lucide-react";
 import { Badge, EmptyState } from "@/components/ui/Primitives";
 import { QuestionContent } from "@/components/questions/QuestionContent";
@@ -30,7 +32,8 @@ export function AgentPerformanceReport({
 }: AgentPerformanceReportProps) {
   const [activeAgentIndex, setActiveAgentIndex] = useState(0);
   const [expandedExamIds, setExpandedExamIds] = useState<Set<string>>(new Set());
-  const [exporting, setExporting] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
 
   if (reports.length === 0) {
     return (
@@ -63,32 +66,39 @@ export function AgentPerformanceReport({
     });
   }
 
-  function handlePrint() {
-    window.print();
+  function handleExportPdf() {
+    try {
+      setExportingPdf(true);
+      const filename =
+        reports.length === 1
+          ? `${(currentReport.agent.name || "Agent").replace(/\s+/g, "_")}_Performance_Report.pdf`
+          : `Team_Agent_Performance_Reports.pdf`;
+      exportAgentReportsToPdf(reports, filename);
+    } catch (err) {
+      console.error("Failed to export PDF report:", err);
+    } finally {
+      setExportingPdf(false);
+    }
   }
 
   function handleExportExcel() {
     try {
-      setExporting(true);
+      setExportingExcel(true);
       const filename =
         reports.length === 1
-          ? `${currentReport.agent.name.replace(/\s+/g, "_")}_Performance_Report.xlsx`
+          ? `${(currentReport.agent.name || "Agent").replace(/\s+/g, "_")}_Performance_Report.xlsx`
           : `Team_Agent_Performance_Reports.xlsx`;
       exportAgentReportsToExcel(reports, filename);
     } catch (err) {
       console.error("Failed to export Excel report:", err);
     } finally {
-      setExporting(false);
+      setExportingExcel(false);
     }
   }
 
   return (
     <div className="space-y-8 pb-12">
-      {/* =========================================================
-         SCREEN VIEW (HIDDEN DURING BROWSER PRINT)
-         ========================================================= */}
-      <div className="print:hidden space-y-8">
-        {/* TOP CONTROLS & HEADER */}
+      {/* TOP CONTROLS & HEADER */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-5 dark:border-slate-800">
         <div>
           <button
@@ -113,21 +123,31 @@ export function AgentPerformanceReport({
         <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={handlePrint}
-            className="btn-secondary inline-flex items-center gap-2 text-sm shadow-sm"
-            title="Print dashboard or save as PDF"
+            onClick={handleExportPdf}
+            disabled={exportingPdf}
+            className="btn-primary inline-flex items-center gap-2 text-sm shadow-sm"
+            title="Download professional vector PDF report"
           >
-            <Printer className="h-4 w-4 text-slate-600 dark:text-slate-300" />
-            <span>Print / PDF</span>
+            {exportingPdf ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <FileDown className="h-4 w-4" />
+            )}
+            <span>{exportingPdf ? "Generating PDF..." : "Export PDF"}</span>
           </button>
 
           <button
             type="button"
             onClick={handleExportExcel}
-            disabled={exporting}
+            disabled={exportingExcel}
             className="btn-secondary inline-flex items-center gap-2 text-sm shadow-sm"
+            title="Download Excel spreadsheet (.xlsx)"
           >
-            <FileSpreadsheet className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+            {exportingExcel ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <FileSpreadsheet className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+            )}
             <span>Export Excel (.xlsx)</span>
           </button>
         </div>
@@ -252,171 +272,12 @@ export function AgentPerformanceReport({
         </section>
       )}
 
-        {/* ACTIVE AGENT DETAIL (INTERACTIVE ON SCREEN) */}
-        <AgentDetailReport
-          report={currentReport}
-          isPrint={false}
-          expandedExamIds={expandedExamIds}
-          onToggleExamExpand={toggleExamExpand}
-        />
-      </div>
-
-      {/* =========================================================
-         PRINT VIEW (FAITHFUL REPORT RENDERED ONTO PAPER / PDF)
-         ========================================================= */}
-      <div className="hidden print:block space-y-8 bg-white text-slate-900">
-        {/* FIRST-PAGE EXECUTIVE SUMMARY TABLE IF MULTIPLE AGENTS ARE SELECTED */}
-        {reports.length > 1 && (
-          <div className="print-page-break-after space-y-6">
-            <PrintTeamSummaryHeader
-              count={reports.length}
-              generatedAt={currentReport.generatedAt}
-            />
-
-            <div className="card overflow-hidden">
-              <div className="border-b border-slate-200 bg-slate-50 px-5 py-3">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-700">
-                  Selected Agents Overview ({reports.length} Agents)
-                </h3>
-              </div>
-              <table className="w-full text-left text-sm">
-                <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-600">
-                  <tr>
-                    <th className="px-5 py-2.5">Agent</th>
-                    <th className="px-5 py-2.5">Overall Score</th>
-                    <th className="px-5 py-2.5">Competency</th>
-                    <th className="px-5 py-2.5">Tests (Comp/Assigned)</th>
-                    <th className="px-5 py-2.5">Attempts</th>
-                    <th className="px-5 py-2.5">Completion Rate</th>
-                    <th className="px-5 py-2.5">Trend</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200">
-                  {reports.map((r) => (
-                    <tr key={r.agent.uid}>
-                      <td className="px-5 py-3">
-                        <span className="font-semibold text-slate-900 block">
-                          {r.agent.name || "Agent"}
-                        </span>
-                        <span className="text-[11px] text-slate-500 font-normal">
-                          {r.agent.email || "No email on file"}
-                        </span>
-                      </td>
-                      <td className="px-5 py-3 font-bold text-slate-900">
-                        {r.summary.overallScore !== null ? `${r.summary.overallScore}%` : "No data"}
-                      </td>
-                      <td className="px-5 py-3">
-                        {r.summary.competencyScore !== null ? `${r.summary.competencyScore}%` : "N/A"}
-                      </td>
-                      <td className="px-5 py-3">
-                        {r.summary.testsCompleted} / {r.summary.totalTestsAssigned}
-                      </td>
-                      <td className="px-5 py-3">{r.summary.totalAttempts}</td>
-                      <td className="px-5 py-3">{r.summary.completionRate}%</td>
-                      <td className="px-5 py-3">
-                        <TrendBadge trend={r.trend} velocity={r.trendVelocity} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {/* INDIVIDUAL COMPLETE REPORTS FOR EVERY SELECTED AGENT */}
-        {reports.map((report, idx) => (
-          <div
-            key={report.agent.uid}
-            className={idx > 0 || reports.length > 1 ? "print-page-break space-y-6" : "space-y-6"}
-          >
-            <ReportPrintHeader report={report} />
-            <AgentDetailReport report={report} isPrint={true} />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/* =========================================================
-   PDF METADATA HEADERS
-   ========================================================= */
-
-function ReportPrintHeader({ report }: { report: AgentPerformanceReportData }) {
-  return (
-    <div className="border-b-2 border-brand-600 pb-4 mb-6 print-avoid-break">
-      <div className="flex items-start justify-between">
-        <div>
-          <span className="text-xs font-bold uppercase tracking-widest text-brand-600">
-            QA Exam Platform
-          </span>
-          <h1 className="text-2xl font-black text-slate-900 tracking-tight mt-0.5">
-            Agent Performance Report
-          </h1>
-        </div>
-        <div className="text-right text-xs text-slate-500">
-          <p className="font-semibold text-slate-700">Official Auditor Audit</p>
-          <p className="mt-0.5">
-            Generated:{" "}
-            {new Date(report.generatedAt).toLocaleString(undefined, {
-              dateStyle: "medium",
-              timeStyle: "short",
-            })}
-          </p>
-        </div>
-      </div>
-
-      <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2 rounded-lg bg-slate-50 p-3 text-xs text-slate-700 border border-slate-200">
-        <div>
-          <span className="font-semibold text-slate-500">Agent: </span>
-          <span className="font-bold text-slate-900">{report.agent.name || "Agent"}</span>
-        </div>
-        <div>
-          <span className="font-semibold text-slate-500">Email: </span>
-          <span className="font-medium text-slate-800">{report.agent.email || "No email on file"}</span>
-        </div>
-        <div>
-          <span className="font-semibold text-slate-500">Agent UID: </span>
-          <code className="text-slate-600 font-mono text-[11px]">{report.agent.uid}</code>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PrintTeamSummaryHeader({
-  count,
-  generatedAt,
-}: {
-  count: number;
-  generatedAt: number;
-}) {
-  return (
-    <div className="border-b-2 border-brand-600 pb-4 mb-6 print-avoid-break">
-      <div className="flex items-start justify-between">
-        <div>
-          <span className="text-xs font-bold uppercase tracking-widest text-brand-600">
-            QA Exam Platform
-          </span>
-          <h1 className="text-2xl font-black text-slate-900 tracking-tight mt-0.5">
-            Agent Performance Report — Team Summary
-          </h1>
-          <p className="mt-1 text-xs text-slate-500">
-            Executive comparison for {count} selected agents
-          </p>
-        </div>
-        <div className="text-right text-xs text-slate-500">
-          <p className="font-semibold text-slate-700">Official Auditor Audit</p>
-          <p className="mt-0.5">
-            Generated:{" "}
-            {new Date(generatedAt).toLocaleString(undefined, {
-              dateStyle: "medium",
-              timeStyle: "short",
-            })}
-          </p>
-        </div>
-      </div>
+      {/* ACTIVE AGENT DETAIL (INTERACTIVE ON SCREEN) */}
+      <AgentDetailReport
+        report={currentReport}
+        expandedExamIds={expandedExamIds}
+        onToggleExamExpand={toggleExamExpand}
+      />
     </div>
   );
 }
@@ -618,15 +479,15 @@ function AgentDetailReport({
                   <th className="px-6 py-3 print:px-3 print:py-2">Exam Name</th>
                   <th className="px-4 py-3 print:px-2 print:py-2">Mode</th>
                   <th className="px-4 py-3 print:px-2 print:py-2">Status</th>
-                  <th className="px-4 py-3 print:px-2 print:py-2">Attempts</th>
-                  <th className="px-4 py-3 print:px-2 print:py-2">Latest Score</th>
-                  <th className="px-4 py-3 print:px-2 print:py-2">Best Score</th>
-                  <th className="px-4 py-3 print:px-2 print:py-2">Avg. Score</th>
-                  <th className="px-4 py-3 print:px-2 print:py-2">Marks</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2 text-center">Attempts</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2 text-center">Master Score</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2 text-center">Progress</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2 text-center">Latest Gain</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2 text-center">Mastered</th>
                   <th className="px-4 py-3 print:px-2 print:py-2">Time</th>
                   <th className="px-4 py-3 print:px-2 print:py-2">Review</th>
                   <th className="px-4 py-3 print:px-2 print:py-2">Completion</th>
-                  {!isPrint && <th className="px-4 py-3 text-center print:hidden">History</th>}
+                  {!isPrint && <th className="px-4 py-3 text-center print:hidden">Progression</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800 print:divide-slate-200">
@@ -681,11 +542,11 @@ function AgentDetailReport({
                   <th className="px-6 py-3 print:px-3 print:py-2">Question</th>
                   <th className="px-4 py-3 print:px-2 print:py-2">Module</th>
                   <th className="px-4 py-3 print:px-2 print:py-2">Feature</th>
-                  <th className="px-4 py-3 print:px-2 print:py-2">Type</th>
                   <th className="px-4 py-3 print:px-2 print:py-2 text-center">Attempts</th>
                   <th className="px-4 py-3 print:px-2 print:py-2 text-center">Incorrect</th>
                   <th className="px-4 py-3 print:px-2 print:py-2">Rate</th>
-                  <th className="px-4 py-3 print:px-2 print:py-2">Latest Result</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Progression</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Mastery Status</th>
                   <th className="px-4 py-3 print:px-2 print:py-2">Latest Score</th>
                 </tr>
               </thead>
@@ -725,11 +586,6 @@ function AgentDetailReport({
                     <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap text-slate-500 text-xs">
                       {q.feature}
                     </td>
-                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap">
-                      <span className="capitalize text-xs text-slate-500">
-                        {q.questionType.replace(/_/g, " ")}
-                      </span>
-                    </td>
                     <td className="px-4 py-3.5 print:px-2 print:py-2.5 text-center font-medium">
                       {q.timesAttempted}
                     </td>
@@ -749,14 +605,17 @@ function AgentDetailReport({
                         </span>
                       </div>
                     </td>
+                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap text-xs font-mono text-slate-600 dark:text-slate-300 print:text-slate-800">
+                      {q.progressionDisplay || "—"}
+                    </td>
                     <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap">
-                      {q.latestResult === "Correct" ? (
-                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400 print:text-emerald-700">
-                          <CheckCircle2 className="h-3.5 w-3.5" /> Correct
+                      {q.eventuallyMastered ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400 print:text-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded-full">
+                          <CheckCircle2 className="h-3 w-3" /> Resolved
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600 dark:text-rose-400 print:text-rose-700">
-                          <AlertTriangle className="h-3.5 w-3.5" /> Incorrect
+                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600 dark:text-rose-400 print:text-rose-700 bg-rose-50 dark:bg-rose-950/40 px-2 py-0.5 rounded-full">
+                          <AlertTriangle className="h-3 w-3" /> Unresolved
                         </span>
                       )}
                     </td>
@@ -1031,22 +890,32 @@ function ExamPerformanceRows({
             {perf.status}
           </span>
         </td>
-        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap font-medium text-slate-800 dark:text-slate-200 print:text-slate-900">
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-center font-medium text-slate-800 dark:text-slate-200 print:text-slate-900">
           {perf.attemptsTaken}
         </td>
-        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap font-semibold">
-          {perf.latestAttemptScore !== null ? `${perf.latestAttemptScore}%` : "—"}
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-center font-bold text-slate-900 dark:text-white print:text-slate-900">
+          {perf.masterScore !== null ? `${perf.masterScore} / ${perf.masterTotalMarks}` : "—"}
         </td>
-        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-slate-600 dark:text-slate-300 print:text-slate-800">
-          {perf.bestScore !== null ? `${perf.bestScore}%` : "—"}
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-center font-bold text-brand-600 dark:text-brand-400 print:text-brand-700">
+          {perf.masterPercentage !== null ? `${perf.masterPercentage}%` : "—"}
         </td>
-        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-slate-500">
-          {perf.averageScore !== null ? `${perf.averageScore}%` : "—"}
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-center text-xs font-semibold">
+          {perf.latestAttemptGain !== null ? (
+            <span
+              className={`rounded-full px-2 py-0.5 ${
+                perf.latestAttemptGain > 0
+                  ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 print:bg-emerald-50 print:text-emerald-800"
+                  : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+              }`}
+            >
+              {perf.latestAttemptGain > 0 ? `+${perf.latestAttemptGain}` : `${perf.latestAttemptGain}`}
+            </span>
+          ) : (
+            <span className="text-slate-400">—</span>
+          )}
         </td>
-        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-xs text-slate-600 dark:text-slate-300 print:text-slate-800">
-          {perf.totalMarks !== null && perf.maxMarks !== null
-            ? `${perf.totalMarks}/${perf.maxMarks}`
-            : "—"}
+        <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-center text-xs font-medium text-slate-700 dark:text-slate-300 print:text-slate-800">
+          {perf.questionsMastered} / {perf.questionsMastered + perf.questionsRemaining}
         </td>
         <td className="px-4 py-4 print:px-2 print:py-2.5 whitespace-nowrap text-xs text-slate-500">
           {formatTimeTaken(perf.timeTakenSeconds)}
@@ -1084,7 +953,7 @@ function ExamPerformanceRows({
             <button
               type="button"
               className="rounded p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
-              title={isExpanded ? "Collapse History" : "Expand Attempt History"}
+              title={isExpanded ? "Collapse Progression" : "Expand Attempt Progression"}
             >
               {isExpanded ? (
                 <ChevronUp className="h-4 w-4" />
@@ -1096,26 +965,30 @@ function ExamPerformanceRows({
         )}
       </tr>
 
-      {/* ATTEMPT HISTORY (SECTION 3) */}
+      {/* ATTEMPT PROGRESSION (SECTION 3) */}
       {showHistory && (
         <tr className="bg-slate-50/70 dark:bg-slate-900/50 print:bg-slate-50 print-avoid-break">
           <td colSpan={isPrint ? 11 : 12} className="px-8 py-4 print:px-4 print:py-3 border-y border-slate-200 dark:border-slate-800 print:border-slate-200">
             <div className="space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 print:text-slate-700">
-                  Attempt History for &ldquo;{perf.examName}&rdquo; ({perf.attempts.length} attempts)
+                  Attempt Progression for &ldquo;{perf.examName}&rdquo; ({perf.attempts.length} attempt{perf.attempts.length === 1 ? "" : "s"})
                 </p>
-                {perf.mergedScorecard && (
-                  <span className="text-xs text-brand-600 dark:text-brand-400 print:text-brand-700 font-medium">
-                    Merged Scorecard: {perf.mergedScorecard.percentage}% ({perf.mergedScorecard.totalMarks}/{perf.mergedScorecard.maxTotalMarks} marks)
+                <div className="flex items-center gap-3 text-xs font-medium">
+                  <span className="text-brand-600 dark:text-brand-400 print:text-brand-700">
+                    Master Score: {perf.masterScore ?? "—"} / {perf.masterTotalMarks} ({perf.masterPercentage !== null ? `${perf.masterPercentage}%` : "—"})
                   </span>
-                )}
+                  <span className="text-slate-400">•</span>
+                  <span className="text-emerald-600 dark:text-emerald-400">
+                    {perf.questionsMastered} / {perf.questionsMastered + perf.questionsRemaining} Mastered
+                  </span>
+                </div>
               </div>
 
               {perf.attempts.length === 0 ? (
                 <p className="text-xs text-slate-400">No attempts have been recorded for this test.</p>
               ) : (
-                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 print:grid-cols-3">
+                <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 print:grid-cols-3">
                   {perf.attempts.map((att) => (
                     <div
                       key={att.id}
@@ -1154,23 +1027,52 @@ function ExamPerformanceRows({
                         </span>
                       </div>
 
-                      <div className="mt-3 flex items-baseline justify-between">
-                        <div>
-                          <p className="text-xl font-extrabold text-slate-900 dark:text-white print:text-slate-900">
-                            {att.percentage !== null ? `${att.percentage}%` : "—"}
-                          </p>
-                          <p className="text-xs text-slate-400 print:text-slate-500">
-                            {att.totalMarks !== null && att.maxTotalMarks !== null
-                              ? `${att.totalMarks} / ${att.maxTotalMarks} marks`
-                              : "Pending marks"}
-                          </p>
+                      <div className="mt-3 space-y-2 border-t border-slate-100 dark:border-slate-800/80 pt-2.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium text-slate-600 dark:text-slate-400">Current Exam Score:</span>
+                          <span className="text-sm font-bold text-slate-800 dark:text-slate-200 print:text-slate-900">
+                            {att.score !== null ? `${att.score}%` : "—"}{" "}
+                            <span className="text-xs font-normal text-slate-400">
+                              ({att.totalMarks ?? "—"} / {att.maxTotalMarks ?? "—"})
+                            </span>
+                          </span>
                         </div>
-                        <div className="text-right text-xs text-slate-500">
-                          <p>Time: {formatTimeTaken(att.timeTakenSeconds)}</p>
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-slate-500">Master Progress:</span>
+                          <span className="text-sm font-bold text-brand-600 dark:text-brand-400 print:text-brand-700">
+                            {att.cumulativeMasterScore !== null
+                              ? `${att.cumulativeMasterScore} / ${perf.masterTotalMarks}`
+                              : "—"}{" "}
+                            <span className="text-xs font-normal text-slate-400">
+                              ({att.cumulativePercentage !== null ? `${att.cumulativePercentage}%` : "—"})
+                            </span>
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-slate-500">Progress Gain:</span>
+                          <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                            {att.progressGain !== null && att.progressGain !== undefined
+                              ? att.progressGain > 0
+                                ? `+${att.progressGain} pts`
+                                : `${att.progressGain} pts`
+                              : "—"}
+                          </span>
+                        </div>
+                        {att.isReattempt && att.rawAttemptMarks !== null && att.rawAttemptMarks !== undefined && (
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-slate-500">This Attempt:</span>
+                            <span className="font-medium text-slate-700 dark:text-slate-300 print:text-slate-800">
+                              {att.rawAttemptMarks} / {att.rawAttemptMaxMarks}{" "}
+                              <span className="text-slate-400">({att.rawAttemptScore ?? "—"}%)</span>
+                            </span>
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between text-xs text-slate-500 pt-1 border-t border-dashed border-slate-100 dark:border-slate-800">
+                          <span>Time: {formatTimeTaken(att.timeTakenSeconds)}</span>
                           {att.submittedAt && (
-                            <p className="text-[11px] text-slate-400 print:text-slate-500">
+                            <span className="text-[11px] text-slate-400 print:text-slate-500">
                               {new Date(att.submittedAt).toLocaleDateString()}
-                            </p>
+                            </span>
                           )}
                         </div>
                       </div>
