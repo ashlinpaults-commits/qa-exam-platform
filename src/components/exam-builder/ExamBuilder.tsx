@@ -15,16 +15,42 @@ import { QuestionBankBrowser } from "@/components/questions/QuestionBankBrowser"
 import { SortableQuestionItem } from "./SortableQuestionItem";
 import { ExamQuestionImportModal } from "./ExamQuestionImportModal";
 import { getQuestionsByIds, createRedactedQuestionSnapshot, stripUndefined } from "@/lib/questions";
-import { createExam, updateExam, getExam } from "@/lib/exams";
+import {
+  createExam,
+  updateExam,
+  getExam,
+  fetchExams,
+  formatStandardExamName,
+  getNextExamNumber,
+  getKnownBatches,
+  parseExamNameComponents,
+} from "@/lib/exams";
+import {
+  CONTROLLED_MODULES,
+  ControlledModule,
+  normalizeLegacyModule,
+} from "@/config/taxonomy";
 import { useAuth } from "@/context/AuthContext";
 import type { Question, Exam, ExamMode, ExamStatus } from "@/types";
 import { EmptyState } from "@/components/ui/Primitives";
-import { Save, Rocket, Loader2, CheckCircle2, Users, Upload } from "lucide-react";
+import { Save, Rocket, Loader2, CheckCircle2, Users, Upload, Sparkles, Layers } from "lucide-react";
+
+const ASSESSMENT_TYPES = ["Test", "Quiz", "Evaluation", "Midterm", "Final"] as const;
 
 export function ExamBuilder({ examId }: { examId?: string }) {
   const { profile } = useAuth();
   const router = useRouter();
+
+  // Standardized Taxonomy States
+  const [batch, setBatch] = useState("PS1126");
+  const [customBatch, setCustomBatch] = useState(false);
+  const [module, setModule] = useState<ControlledModule>("RCM & Clinical");
+  const [assessmentType, setAssessmentType] = useState<string>("Test");
+  const [testNumber, setTestNumber] = useState(1);
+  const [manualNameOverride, setManualNameOverride] = useState(false);
   const [name, setName] = useState("");
+  const [allExams, setAllExams] = useState<Exam[]>([]);
+
   const [category, setCategory] = useState<"Revenue Cycle Management" | "Patient Engagement">("Revenue Cycle Management");
   const [examDate, setExamDate] = useState(new Date().toISOString().split("T")[0]);
   const [description, setDescription] = useState("");
@@ -39,6 +65,21 @@ export function ExamBuilder({ examId }: { examId?: string }) {
   const [examImportOpen, setExamImportOpen] = useState(false);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+
+  // Load existing exams to determine known batches and next numbering
+  useEffect(() => {
+    fetchExams().then((exams) => {
+      setAllExams(exams);
+    }).catch(console.error);
+  }, []);
+
+  // Dynamically update auto-generated exam name when Batch, Module, or Assessment Type changes
+  useEffect(() => {
+    if (examId || manualNameOverride) return;
+    const nextNum = getNextExamNumber(allExams, batch, module, assessmentType);
+    setTestNumber(nextNum);
+    setName(formatStandardExamName(batch, module, assessmentType, nextNum));
+  }, [batch, module, assessmentType, allExams, examId, manualNameOverride]);
 
   useEffect(() => {
     if (!examId) return;
@@ -56,22 +97,22 @@ export function ExamBuilder({ examId }: { examId?: string }) {
         setStatus(exam.status);
         setAssignedAgentIds(exam.assignedAgentIds ?? []);
 
+        // Parse legacy or standardized exam name components
+        const parsed = parseExamNameComponents(exam.name);
+        if (parsed.batch) setBatch(parsed.batch);
+        if (parsed.module) setModule(parsed.module);
+        if (parsed.assessmentType) setAssessmentType(parsed.assessmentType);
+        if (parsed.testNumber) setTestNumber(parsed.testNumber);
+
         // Load or infer category
         if (exam.category) {
           setCategory(exam.category);
         } else {
-          const nameLower = (exam.name || "").toLowerCase();
-          const descLower = (exam.description || "").toLowerCase();
-          const isPE =
-            nameLower.includes("p.e") ||
-            nameLower.includes("pe |") ||
-            nameLower.includes("| pe") ||
-            nameLower.includes("patient engagement") ||
-            nameLower.includes("pt. eng") ||
-            nameLower.includes("pt eng") ||
-            /\bpe\b/i.test(nameLower) ||
-            descLower.includes("patient engagement");
-          setCategory(isPE ? "Patient Engagement" : "Revenue Cycle Management");
+          setCategory(
+            parsed.module === "Patient Engagement"
+              ? "Patient Engagement"
+              : "Revenue Cycle Management"
+          );
         }
 
         // Load or format exam date
@@ -154,11 +195,20 @@ export function ExamBuilder({ examId }: { examId?: string }) {
     // If auditor explicitly clicked publish -> "published"
     // If editing existing exam -> retain current status (e.g. "published", "active", "draft", etc.)
     // If creating a new exam -> "draft"
+    const cleanBatch = batch.trim().replace(/\s+/g, "").toUpperCase();
+    const cleanCategory: "Revenue Cycle Management" | "Patient Engagement" =
+      module === "Patient Engagement" ? "Patient Engagement" : "Revenue Cycle Management";
+
     const targetStatus: ExamStatus = publish ? "published" : examId ? status : "draft";
 
     const payload = stripUndefined({
       name: name.trim(),
-      category,
+      batch: cleanBatch,
+      batchId: cleanBatch,
+      module,
+      assessmentType,
+      testNumber,
+      category: cleanCategory,
       examDate: examDate || undefined,
       description: description.trim(),
       mode,
@@ -187,6 +237,8 @@ export function ExamBuilder({ examId }: { examId?: string }) {
       setSaving(false);
     }
   }
+
+  const knownBatches = getKnownBatches(allExams);
 
   if (!loaded) return <p className="text-sm text-slate-400">Loading exam...</p>;
 
@@ -218,20 +270,124 @@ export function ExamBuilder({ examId }: { examId?: string }) {
       {/* Right Column: Exam Details & Selected Questions */}
       <div>
         <div className="card mb-4 space-y-3 p-4">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500">
-                Module / Category
-              </label>
-              <select
-                className="input text-sm"
-                value={category}
-                onChange={(e) => setCategory(e.target.value as "Revenue Cycle Management" | "Patient Engagement")}
+          {/* Standardized Exam Classification */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3.5 dark:border-slate-800 dark:bg-slate-900/40">
+            <div className="mb-3 flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Standardized Exam Identification
+              </span>
+              <button
+                type="button"
+                onClick={() => setManualNameOverride((prev) => !prev)}
+                className="text-[11px] font-medium text-brand-600 hover:underline dark:text-brand-400"
               >
-                <option value="Revenue Cycle Management">Revenue Cycle Management (RCM)</option>
-                <option value="Patient Engagement">Patient Engagement (Pt. Eng)</option>
-              </select>
+                {manualNameOverride ? "Use Standard Auto-Name" : "Custom Title Override"}
+              </button>
             </div>
+
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+              {/* Batch Selector */}
+              <div>
+                <div className="mb-1 flex items-center justify-between">
+                  <label className="text-[11px] font-medium text-slate-500">Batch</label>
+                  <button
+                    type="button"
+                    onClick={() => setCustomBatch((prev) => !prev)}
+                    className="text-[10px] text-brand-600 hover:underline dark:text-brand-400"
+                  >
+                    {customBatch ? "Select existing" : "+ New"}
+                  </button>
+                </div>
+                {customBatch ? (
+                  <input
+                    className="input text-xs font-semibold"
+                    placeholder="e.g. PS1126"
+                    value={batch}
+                    onChange={(e) => setBatch(e.target.value.toUpperCase())}
+                    required
+                  />
+                ) : (
+                  <select
+                    className="input text-xs font-semibold"
+                    value={batch}
+                    onChange={(e) => setBatch(e.target.value)}
+                  >
+                    {knownBatches.map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              {/* Module Selector */}
+              <div>
+                <label className="mb-1 block text-[11px] font-medium text-slate-500">Module</label>
+                <select
+                  className="input text-xs font-semibold"
+                  value={module}
+                  onChange={(e) => {
+                    const newMod = e.target.value as ControlledModule;
+                    setModule(newMod);
+                    setCategory(
+                      newMod === "Patient Engagement"
+                        ? "Patient Engagement"
+                        : "Revenue Cycle Management"
+                    );
+                  }}
+                >
+                  {CONTROLLED_MODULES.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Assessment Type Selector */}
+              <div>
+                <label className="mb-1 block text-[11px] font-medium text-slate-500">Assessment</label>
+                <select
+                  className="input text-xs font-semibold"
+                  value={assessmentType}
+                  onChange={(e) => setAssessmentType(e.target.value)}
+                >
+                  {ASSESSMENT_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Generated Standard Name Banner */}
+            <div className="mt-3 rounded-lg border border-brand-200 bg-brand-50/70 p-2.5 dark:border-brand-900/60 dark:bg-brand-950/30">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-300">
+                  Standardized Exam Name
+                </span>
+                <span className="text-[11px] font-mono text-slate-500">
+                  Assigned Number: #{String(testNumber).padStart(2, "0")}
+                </span>
+              </div>
+              {manualNameOverride ? (
+                <input
+                  className="input mt-1.5 font-medium text-xs text-slate-900 dark:text-slate-100"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Override exam title..."
+                />
+              ) : (
+                <p className="mt-1 font-mono text-sm font-bold text-brand-900 dark:text-brand-100">
+                  {name}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500">
                 Exam Date
@@ -243,18 +399,15 @@ export function ExamBuilder({ examId }: { examId?: string }) {
                 onChange={(e) => setExamDate(e.target.value)}
               />
             </div>
-          </div>
-
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500">
-              Test Name
-            </label>
-            <input
-              className="input font-medium"
-              placeholder="e.g. Test 1, Test 2, Midterm Evaluation..."
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500">
+                Exam Mode
+              </label>
+              <select className="input text-sm" value={mode} onChange={(e) => setMode(e.target.value as ExamMode)}>
+                <option value="normal">Normal — one attempt, manually scored</option>
+                <option value="until_perfect">Until Perfect 10 — retake until 10/10</option>
+              </select>
+            </div>
           </div>
 
           <div>
@@ -267,18 +420,6 @@ export function ExamBuilder({ examId }: { examId?: string }) {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
-          </div>
-
-          <div className="flex gap-3">
-            <div className="flex-1">
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500">
-                Exam Mode
-              </label>
-              <select className="input text-sm" value={mode} onChange={(e) => setMode(e.target.value as ExamMode)}>
-                <option value="normal">Normal — one attempt, manually scored</option>
-                <option value="until_perfect">Until Perfect 10 — retake until 10/10</option>
-              </select>
-            </div>
           </div>
 
           {/* Assigned Agents Preservation Feedback */}

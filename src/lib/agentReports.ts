@@ -20,6 +20,7 @@ import {
   type LearningTrend,
 } from "./competency";
 import { computeMergedScorecard, computeExamMasterScorecard } from "./attempts";
+import { normalizeLegacyModule, classifyQuestionTaxonomy } from "@/config/taxonomy";
 
 /* =========================================================
    REPORT TYPES & DATA STRUCTURES
@@ -110,6 +111,7 @@ export interface AgentMissedQuestion {
   questionId: string;
   questionText: string;
   module: string;
+  topic: string;
   feature: string;
   questionType: string;
   timesAttempted: number;
@@ -559,7 +561,32 @@ export function buildAgentPerformanceReport({
   const frequentlyMissedQuestions: AgentMissedQuestion[] = Array.from(questionHistoryMap.values())
     .filter((record) => record.timesIncorrect > 0)
     .map((record) => {
-      const q = record.questionSnapshot || questionMap.get(record.questionId);
+      // Prioritize live question bank entry for up-to-date taxonomy, fallback to snapshot
+      const liveQ = questionMap.get(record.questionId);
+      const snap = record.questionSnapshot;
+      const q = liveQ || snap;
+
+      const normModule = normalizeLegacyModule(q?.module || snap?.module || "General");
+      let cleanTopic = (liveQ?.topic || liveQ?.feature || snap?.topic || snap?.feature || "").trim();
+
+      // Eliminate legacy sheet names (0109, 0209, 0909, Sheet1) or empty topics by running topic classifier
+      if (
+        !cleanTopic ||
+        cleanTopic.toLowerCase().includes("0909") ||
+        cleanTopic.toLowerCase().includes("0109") ||
+        cleanTopic.toLowerCase().includes("0209") ||
+        cleanTopic.toLowerCase() === "sheet1" ||
+        cleanTopic.toLowerCase() === normModule.toLowerCase()
+      ) {
+        const classified = classifyQuestionTaxonomy(
+          q?.questionText || "",
+          q?.expectedAnswer || "",
+          normModule,
+          cleanTopic
+        );
+        cleanTopic = classified.suggestedTopic;
+      }
+
       const incorrectPct = Math.round((record.timesIncorrect / record.timesAttempted) * 100);
       const eventuallyMastered = (record.bestMarks / record.latestMaxMarks) >= 0.70;
       const progressionDisplay = record.progressionStates.join(" → ");
@@ -567,8 +594,9 @@ export function buildAgentPerformanceReport({
       return {
         questionId: record.questionId,
         questionText: q?.questionText?.trim() || "Question text unavailable",
-        module: q?.module || "General",
-        feature: q?.feature || "General",
+        module: normModule,
+        topic: cleanTopic,
+        feature: cleanTopic,
         questionType: q?.type || "descriptive",
         timesAttempted: record.timesAttempted,
         timesIncorrect: record.timesIncorrect,
@@ -665,6 +693,8 @@ export function exportAgentReportsToExcel(
     "Learning Trend": r.trend,
     "Trend Velocity (%)": r.trendVelocity !== null ? `${r.trendVelocity > 0 ? "+" : ""}${r.trendVelocity}%` : "N/A",
     "Coaching Priority": r.coaching.priority,
+    "Strongest Topic": r.competency.strongestTopic ? `${r.competency.strongestTopic.topic} (${r.competency.strongestTopic.score}%)` : "N/A",
+    "Weakest Topic": r.competency.weakestTopic ? `${r.competency.weakestTopic.topic} (${r.competency.weakestTopic.score}%)` : "N/A",
   }));
   const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
   XLSX.utils.book_append_sheet(wb, wsSummary, "Agent Summary");
@@ -709,7 +739,7 @@ export function exportAgentReportsToExcel(
       missedRows.push({
         "Agent Name": r.agent.name || "Agent",
         Module: q.module,
-        Feature: q.feature,
+        Topic: q.topic || q.feature,
         Question: q.questionText,
         Type: q.questionType,
         "Times Attempted": q.timesAttempted,

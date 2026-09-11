@@ -799,7 +799,7 @@ function renderFrequentlyMissedQuestions(
 
     doc.setTextColor(...COLORS.charcoal);
     doc.text(
-      `${q.module.toUpperCase()} · ${q.feature.toUpperCase()}`,
+      `${q.module.toUpperCase()} · ${(q.topic || q.feature).toUpperCase()}`,
       MARGIN_LEFT + 12,
       y + 5
     );
@@ -894,8 +894,22 @@ function renderCompetencyAndAssessment(
 
   y += 5;
 
-  // Module Competency Table
-  const moduleRows = competency.moduleCompetency.map((m) => {
+  // Module Competency Table (modules with loss of points < 100% shown on top)
+  const sortedModules = [...(competency.moduleCompetency || [])].sort((a, b) => {
+    const aHasLoss = a.score < 100;
+    const bHasLoss = b.score < 100;
+    if (aHasLoss && !bHasLoss) return -1;
+    if (!aHasLoss && bHasLoss) return 1;
+    if (a.score !== b.score) {
+      return a.score - b.score;
+    }
+    if ((b.weakQuestions ?? 0) !== (a.weakQuestions ?? 0)) {
+      return (b.weakQuestions ?? 0) - (a.weakQuestions ?? 0);
+    }
+    return a.module.localeCompare(b.module);
+  });
+
+  const moduleRows = sortedModules.map((m) => {
     let rating = "Proficient";
     if (m.score < 60) rating = "Critical Weakness";
     else if (m.score < 80) rating = "Moderate Gap";

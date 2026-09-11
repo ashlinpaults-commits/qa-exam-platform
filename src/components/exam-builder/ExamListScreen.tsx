@@ -18,6 +18,8 @@ import {
   ChevronUp,
   Search,
   RefreshCw,
+  FileText,
+  BarChart3,
 } from "lucide-react";
 import { AssignAgentsModal } from "./AssignAgentsModal";
 
@@ -29,54 +31,62 @@ const STATUS_COLOR: Record<ExamStatus, "slate" | "brand" | "green" | "amber" | "
   archived: "red",
 };
 
-export type ExamModuleCategory = "Revenue Cycle Management" | "Patient Engagement";
+import {
+  CONTROLLED_MODULES,
+  ControlledModule,
+  normalizeLegacyModule,
+} from "@/config/taxonomy";
+import { parseExamNameComponents } from "@/lib/exams";
+
+export type ExamModuleCategory = ControlledModule;
 
 interface ModuleConfig {
   id: ExamModuleCategory;
   name: string;
   code: string;
   description: string;
+  icon: React.ComponentType<{ className?: string }>;
 }
 
 const MODULES: ModuleConfig[] = [
   {
-    id: "Revenue Cycle Management",
-    name: "Revenue Cycle Management",
+    id: "RCM & Clinical",
+    name: "RCM & Clinical",
     code: "RCM",
-    description: "Billing, insurance verification, claims processing, and financial workflows.",
+    description: "Revenue cycle, billing, insurance, care notes, odontogram, perio, and treatment planning.",
+    icon: FileText,
   },
   {
     id: "Patient Engagement",
     name: "Patient Engagement",
-    code: "Pt. Eng",
-    description: "Scheduling, front-desk communication, patient intake, and service workflows.",
+    code: "ENG",
+    description: "Campaigns, communication hub, messaging, reminders, patient surveys, intake, and scheduling.",
+    icon: Users,
+  },
+  {
+    id: "Reporting",
+    name: "Reporting",
+    code: "REP",
+    description: "Financial, operational, audit, clinical treatment, and patient recall analytics.",
+    icon: BarChart3,
   },
 ];
 
 /**
- * Safely categorizes an exam based on existing naming conventions without modifying Firestore documents.
- * Any exam matching "P.E", "Pt. Eng", or "Patient Engagement" maps to Patient Engagement;
- * all other exams map to Revenue Cycle Management.
+ * Safely categorizes an exam into the standardized ControlledModule taxonomy.
  */
 export function categorizeExam(exam: Exam): ExamModuleCategory {
-  if (exam.category) {
-    if (exam.category === "Patient Engagement") return "Patient Engagement";
-    return "Revenue Cycle Management";
+  if (exam.module) {
+    return normalizeLegacyModule(exam.module);
   }
-  const name = (exam.name || "").toLowerCase();
-  const desc = (exam.description || "").toLowerCase();
-
-  const isPE =
-    name.includes("p.e") ||
-    name.includes("pe |") ||
-    name.includes("| pe") ||
-    name.includes("patient engagement") ||
-    name.includes("pt. eng") ||
-    name.includes("pt eng") ||
-    /\bpe\b/i.test(name) ||
-    desc.includes("patient engagement");
-
-  return isPE ? "Patient Engagement" : "Revenue Cycle Management";
+  if (exam.category) {
+    return normalizeLegacyModule(exam.category);
+  }
+  const parsed = parseExamNameComponents(exam.name || "");
+  if (parsed.module) {
+    return parsed.module;
+  }
+  return normalizeLegacyModule(exam.name || "");
 }
 
 /**
@@ -95,7 +105,8 @@ export function deriveCleanTitle(exam: Exam, indexInModule: number): { title: st
   // Check for explicit "Test <number>" in the legacy name
   const testMatch = raw.match(/\bTest\s*(\d+)\b/i);
   if (testMatch) {
-    return { title: `Test ${parseInt(testMatch[1], 10)}`, isLegacy: true };
+    const isCopy = /\(copy\)/i.test(raw);
+    return { title: `Test ${parseInt(testMatch[1], 10)}${isCopy ? " (Copy)" : ""}`, isLegacy: true };
   }
 
   // Check for "Day <number>"
@@ -279,26 +290,28 @@ export function ExamListScreen() {
   }, [exams, searchQuery]);
 
   // Group exams by UI module
-  const groupedExams = useMemo(() => {
-    const rcm: Exam[] = [];
-    const pe: Exam[] = [];
+  const groupedExams = useMemo((): Record<ControlledModule, Exam[]> => {
+    const map: Record<ControlledModule, Exam[]> = {
+      "RCM & Clinical": [],
+      "Patient Engagement": [],
+      "Reporting": [],
+    };
 
     filteredExams.forEach((exam) => {
-      if (categorizeExam(exam) === "Patient Engagement") {
-        pe.push(exam);
+      const cat = categorizeExam(exam);
+      if (map[cat]) {
+        map[cat].push(exam);
       } else {
-        rcm.push(exam);
+        map["RCM & Clinical"].push(exam);
       }
     });
 
     // Sort chronologically within each module to ensure stable "Test 1, Test 2, ..." numbering
-    rcm.sort((a, b) => a.createdAt - b.createdAt);
-    pe.sort((a, b) => a.createdAt - b.createdAt);
+    (Object.keys(map) as ControlledModule[]).forEach((key) => {
+      map[key].sort((a, b) => a.createdAt - b.createdAt);
+    });
 
-    return {
-      "Revenue Cycle Management": rcm,
-      "Patient Engagement": pe,
-    };
+    return map;
   }, [filteredExams]);
 
   const totalAssignedAgents = useMemo(() => {
@@ -331,7 +344,7 @@ export function ExamListScreen() {
       </div>
 
       {/* Operational Overview Cards */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
           <p className="text-xs font-medium uppercase tracking-wider text-slate-400">Total Exams</p>
           <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100">{exams.length}</p>
@@ -340,7 +353,7 @@ export function ExamListScreen() {
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
           <p className="text-xs font-medium uppercase tracking-wider text-slate-400">RCM Tests</p>
           <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100">
-            {groupedExams["Revenue Cycle Management"].length}
+            {groupedExams["RCM & Clinical"].length}
           </p>
         </div>
 
@@ -352,6 +365,13 @@ export function ExamListScreen() {
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
+          <p className="text-xs font-medium uppercase tracking-wider text-slate-400">Reporting Tests</p>
+          <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100">
+            {groupedExams["Reporting"].length}
+          </p>
+        </div>
+
+        <div className="col-span-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/60 sm:col-span-1">
           <p className="text-xs font-medium uppercase tracking-wider text-slate-400">Assigned Agents</p>
           <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100">{totalAssignedAgents}</p>
         </div>
@@ -390,12 +410,15 @@ export function ExamListScreen() {
                 {/* Module Header Container */}
                 <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-800/40 sm:p-5">
                   <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-50 text-sm font-bold text-brand-700 dark:bg-brand-900/40 dark:text-brand-300">
-                      {module.code}
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-50 text-brand-700 dark:bg-brand-900/40 dark:text-brand-300">
+                      <module.icon className="h-5 w-5" />
                     </div>
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
                         <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">{module.name}</h2>
+                        <span className="rounded-md bg-slate-200/70 px-1.5 py-0.5 text-[11px] font-semibold tracking-wider text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                          {module.code}
+                        </span>
                         <Badge color="slate">
                           {moduleExams.length} {moduleExams.length === 1 ? "Test" : "Tests"}
                         </Badge>
@@ -426,7 +449,7 @@ export function ExamListScreen() {
                       </div>
                     ) : (
                       <div className="space-y-3">
-                        {moduleExams.map((exam, index) => {
+                        {moduleExams.map((exam: Exam, index: number) => {
                           const { title: cleanTitle, isLegacy } = deriveCleanTitle(exam, index);
 
                           return (
@@ -444,18 +467,18 @@ export function ExamListScreen() {
                                     >
                                       {cleanTitle}
                                     </Link>
-                                    <Badge color={STATUS_COLOR[exam.status]}>{formatStatus(exam.status)}</Badge>
+                                    <Badge color={STATUS_COLOR[exam.status as ExamStatus] || "slate"}>{formatStatus(exam.status)}</Badge>
                                     <Badge color={exam.mode === "until_perfect" ? "amber" : "slate"}>
                                       {exam.mode === "until_perfect" ? "Until Perfect 10" : "Normal"}
                                     </Badge>
                                   </div>
 
-                                  {/* Legacy Reference Subtitle (preserves original identification) */}
-                                  {isLegacy && (
-                                    <p className="mt-0.5 truncate font-mono text-xs text-slate-400" title={exam.name}>
-                                      Original: {exam.name}
-                                    </p>
-                                  )}
+                                   {/* Standardized Exam Identifier Subtitle */}
+                                   {exam.name && exam.name !== cleanTitle && (
+                                     <p className="mt-0.5 truncate font-mono text-xs text-slate-400" title={exam.name}>
+                                       {exam.name}
+                                     </p>
+                                   )}
 
                                   {/* Description if present */}
                                   {exam.description && (

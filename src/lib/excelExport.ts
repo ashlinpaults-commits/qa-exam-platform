@@ -1,21 +1,28 @@
 import * as XLSX from "xlsx";
 import type { Question, Exam, ExamAttempt, AppUser } from "@/types";
 
+import { normalizeLegacyModule } from "@/config/taxonomy";
+
 export function exportQuestionsToExcel(questions: Question[], filename = "questions_export.xlsx") {
-  const rows = questions.map((q) => ({
-    "Question ID": q.id,
-    Module: q.module,
-    Topic: q.feature,
-    Difficulty: q.difficulty,
-    Type: q.type,
-    Question: q.questionText,
-    "Expected Answer": q.expectedAnswer,
-    Tags: q.tags.join(", "),
-    Notes: q.notes ?? "",
-    "Times Asked": q.stats.timesAsked,
-    "Avg Marks": q.stats.avgMarks,
-    "Correct %": q.stats.correctPct,
-  }));
+  const rows = questions.map((q) => {
+    const rawTopic = (q.topic || q.feature || "").trim();
+    const cleanTopic = rawTopic.replace(/^(0109|0209|0909|Sheet1).*$/i, "General") || "General";
+
+    return {
+      "Question ID": q.id,
+      Module: normalizeLegacyModule(q.module),
+      Topic: cleanTopic,
+      Difficulty: q.difficulty,
+      Type: q.type,
+      Question: q.questionText,
+      "Expected Answer": q.expectedAnswer,
+      Tags: q.tags.join(", "),
+      Notes: q.notes ?? "",
+      "Times Asked": q.stats.timesAsked,
+      "Avg Marks": q.stats.avgMarks,
+      "Correct %": q.stats.correctPct,
+    };
+  });
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Questions");
@@ -32,13 +39,19 @@ export function exportAttemptsToExcel(
   const rows: Record<string, unknown>[] = [];
   attempts.forEach((a) => {
     a.answers.forEach((ans) => {
+      const q = questionsById[ans.questionId];
+      const rawTopic = q ? (q.topic || q.feature || "").trim() : "";
+      const cleanTopic = rawTopic.replace(/^(0109|0209|0909|Sheet1).*$/i, "General") || "General";
+
       rows.push({
         Exam: exam.name,
         Agent: usersById[a.agentId]?.name ?? a.agentId,
         Attempt: a.attemptNumber,
-        Question: questionsById[ans.questionId]?.questionText ?? ans.questionId,
+        Module: q ? normalizeLegacyModule(q.module) : "—",
+        Topic: q ? cleanTopic : "—",
+        Question: q?.questionText ?? ans.questionId,
         "Agent Answer": ans.agentAnswer,
-        "Expected Answer": questionsById[ans.questionId]?.expectedAnswer ?? "",
+        "Expected Answer": q?.expectedAnswer ?? "",
         Marks: ans.marks ?? "",
         "Max Marks": ans.maxMarks,
         Comments: ans.comments ?? "",

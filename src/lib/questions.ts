@@ -39,6 +39,7 @@ export function invalidateQuestionBankCache() {
 export interface QuestionFilters {
   search?: string;
   module?: string;
+  topic?: string;
   difficulty?: Difficulty;
   tags?: string[];
   type?: QuestionType;
@@ -64,11 +65,17 @@ export async function fetchQuestionsPage(
   const snap = await getDocs(q);
   let docs = snap.docs.map((d) => ({ id: d.id, ...d.data() } as Question));
 
+  if (filters.topic) {
+    const t = filters.topic.toLowerCase();
+    docs = docs.filter((d) => (d.topic || d.feature || "").toLowerCase() === t);
+  }
+
   if (filters.search) {
     const s = filters.search.toLowerCase();
     docs = docs.filter(
       (d) =>
         d.questionText.toLowerCase().includes(s) ||
+        (d.topic || "").toLowerCase().includes(s) ||
         d.feature.toLowerCase().includes(s) ||
         d.expectedAnswer.toLowerCase().includes(s)
     );
@@ -104,12 +111,15 @@ export async function createQuestion(
   data: Omit<Question, "id" | "createdAt" | "updatedAt" | "version" | "stats">,
   createdBy: string
 ): Promise<Question> {
-  // Firestore throws (and, since callers rarely catch, silently no-ops in the
-  // UI) on ANY field with value `undefined` — and the question form always
-  // sends the type-specific fields (options, imageUrl, etc.) as `undefined`
-  // for every type that doesn't use them. Strip them before writing.
+  // Normalize topic and feature so both are consistently populated
+  const topic = (data.topic || data.feature || "General").trim();
+  const feature = (data.feature || topic).trim();
+
+  // Firestore throws on ANY field with value `undefined` — strip before writing.
   const payload = stripUndefined({
     ...data,
+    topic,
+    feature,
     createdBy,
     version: 1,
     createdAt: Date.now(),
@@ -118,16 +128,20 @@ export async function createQuestion(
   });
   const ref = await addDoc(collection(db, COL), payload);
   const created = { id: ref.id, ...payload } as Question;
-  // Patch the cache in place instead of invalidating it — avoids a full
-  // collection re-read (which is what was actually burning through the
-  // Firestore daily read quota on every single save).
   if (questionBankCache) questionBankCache = [created, ...questionBankCache];
   return created;
 }
 
 export async function updateQuestion(id: string, data: Partial<Question>): Promise<Question> {
+  const syncData: Partial<Question> = { ...data };
+  if (syncData.topic && !syncData.feature) {
+    syncData.feature = syncData.topic;
+  } else if (syncData.feature && !syncData.topic) {
+    syncData.topic = syncData.feature;
+  }
+
   const payload = stripUndefined({
-    ...data,
+    ...syncData,
     updatedAt: Date.now(),
     version: increment(1),
   });
@@ -135,7 +149,7 @@ export async function updateQuestion(id: string, data: Partial<Question>): Promi
   const existing = questionBankCache?.find((q) => q.id === id);
   const updated = {
     ...(existing ?? {}),
-    ...data,
+    ...syncData,
     id,
     updatedAt: payload.updatedAt as number,
     version: (existing?.version ?? 0) + 1,

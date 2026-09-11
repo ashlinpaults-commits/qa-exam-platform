@@ -1,25 +1,31 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { getExam } from "@/lib/exams";
-import { startAttempt, saveAnswer, submitAttempt, getAttempt } from "@/lib/attempts";
+import {
+  startAttempt,
+  saveAllAnswers,
+  verifyAttemptAnswers,
+  submitAttempt,
+  getAttempt,
+} from "@/lib/attempts";
 import { useAuth } from "@/context/AuthContext";
 import type { Exam, Question, ExamAttempt } from "@/types";
 import { AnswerInput } from "@/components/questions/AnswerInput";
 import { QuestionContent } from "@/components/questions/QuestionContent";
-import { Loader2, ChevronLeft, ChevronRight, Check } from "lucide-react";
-
-// Debounce autosave so we don't write to Firestore on every keystroke.
-function useDebouncedSave(fn: () => void, delay: number, deps: unknown[]) {
-  const timer = useRef<ReturnType<typeof setTimeout>>();
-  useEffect(() => {
-    clearTimeout(timer.current);
-    timer.current = setTimeout(fn, delay);
-    return () => clearTimeout(timer.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-}
+import {
+  PreSubmissionModal,
+  type SubmitStage,
+} from "./PreSubmissionModal";
+import {
+  Loader2,
+  ChevronLeft,
+  ChevronRight,
+  Check,
+  AlertTriangle,
+  Send,
+} from "lucide-react";
 
 export function TakeExam({ examId }: { examId: string }) {
   const { profile } = useAuth();
@@ -31,10 +37,28 @@ export function TakeExam({ examId }: { examId: string }) {
   const [index, setIndex] = useState(0);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [error, setError] = useState("");
-  const lastSavedAnswerRef = useRef<Record<string, string>>({});
 
+  // Pre-submission review modal state
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [submitStage, setSubmitStage] = useState<SubmitStage>("idle");
+  const [submitError, setSubmitError] = useState("");
+
+  // Refs to prevent closure staleness and race conditions
+  const answersRef = useRef<Record<string, string>>({});
+  const dirtyKeysRef = useRef<Set<string>>(new Set());
+  const lastSavedAnswerRef = useRef<Record<string, string>>({});
+  const saveInProgressRef = useRef(false);
+  const flushRequestedRef = useRef(false);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Synchronize answersRef with answers state
+  useEffect(() => {
+    answersRef.current = answers;
+  }, [answers]);
+
+  // Load Exam and Attempt
   useEffect(() => {
     if (!profile?.uid) return;
     let cancelled = false;
@@ -61,12 +85,6 @@ export function TakeExam({ examId }: { examId: string }) {
             status: a.status,
           });
 
-          // Each answer carries a snapshot of the question exactly as it
-          // was when this attempt started — use that instead of a live
-          // Question Bank fetch, so an auditor editing a question mid-exam
-          // can't change what the agent is currently looking at. Older
-          // attempts created before snapshots existed fall back to a live
-          // fetch so they keep working.
           const qs = a.answers
             .map((ans) => ans.questionSnapshot ?? e.questionSnapshots?.[ans.questionId])
             .filter(Boolean) as Question[];
@@ -77,10 +95,12 @@ export function TakeExam({ examId }: { examId: string }) {
 
           const initial: Record<string, string> = {};
           a.answers.forEach((ans) => {
-            initial[ans.questionId] = ans.agentAnswer;
-            lastSavedAnswerRef.current[ans.questionId] = ans.agentAnswer;
+            const val = ans.agentAnswer || "";
+            initial[ans.questionId] = val;
+            lastSavedAnswerRef.current[ans.questionId] = val;
           });
           setAnswers(initial);
+          answersRef.current = initial;
         }
       } catch (err) {
         if (cancelled) return;
@@ -96,54 +116,144 @@ export function TakeExam({ examId }: { examId: string }) {
     };
   }, [examId, profile?.uid]);
 
-  const current = questions[index];
+  // Serialized atomic flush of all dirty answers
+  const flushDirtyAnswers = useCallback(async (): Promise<boolean> => {
+    if (!attempt || dirtyKeysRef.current.size === 0) return true;
+    if (saveInProgressRef.current) {
+      flushRequestedRef.current = true;
+      return true;
+    }
 
-  useDebouncedSave(
-    () => {
-      if (!attempt || !current) return;
-      const val = answers[current.id];
-      if (val === undefined) return;
-      // Skip writing if the answer has not changed from server or last save
-      if (lastSavedAnswerRef.current[current.id] === val) return;
+    saveInProgressRef.current = true;
+    setSaveStatus("saving");
 
-      setSaveStatus("saving");
-      saveAnswer(attempt.id, current.id, val, attempt.answers).then((updated) => {
-        lastSavedAnswerRef.current[current.id] = val;
-        setAttempt((prev) => (prev ? { ...prev, answers: updated } : prev));
-        setSaveStatus("saved");
-      }).catch((err) => {
-        console.error("Failed to save answer", err);
-        setSaveStatus("idle");
-        setError(err instanceof Error ? err.message : "Couldn't save your answer. Check your connection and retry.");
-      });
-    },
-    900,
-    [answers[current?.id ?? ""]]
-  );
+    const toSave: Record<string, string> = {};
+    dirtyKeysRef.current.forEach((qid) => {
+      toSave[qid] = answersRef.current[qid] ?? "";
+    });
 
-  async function handleSubmit() {
-    if (!attempt) return;
-    setSubmitting(true);
     try {
-      // The debounce may still be pending for the last field the agent typed.
-      // Flush it before changing the attempt status to submitted only if changed.
-      if (current && answers[current.id] !== undefined && lastSavedAnswerRef.current[current.id] !== answers[current.id]) {
-        await saveAnswer(attempt.id, current.id, answers[current.id], attempt.answers);
-        lastSavedAnswerRef.current[current.id] = answers[current.id];
+      await saveAllAnswers(attempt.id, toSave);
+      Object.entries(toSave).forEach(([qid, val]) => {
+        if (answersRef.current[qid] === val) {
+          dirtyKeysRef.current.delete(qid);
+        }
+        lastSavedAnswerRef.current[qid] = val;
+      });
+      setSaveStatus("saved");
+      return true;
+    } catch (err) {
+      console.error("Failed to save answers", err);
+      setSaveStatus("error");
+      return false;
+    } finally {
+      saveInProgressRef.current = false;
+      if (flushRequestedRef.current) {
+        flushRequestedRef.current = false;
+        flushDirtyAnswers();
       }
+    }
+  }, [attempt]);
+
+  // Clean up debounce timer on unmount and perform final synchronous flush if needed
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleAnswerChange = (qId: string, val: string) => {
+    dirtyKeysRef.current.add(qId);
+    setAnswers((prev) => {
+      const next = { ...prev, [qId]: val };
+      answersRef.current = next;
+      return next;
+    });
+
+    // Schedule debounced flush (800ms)
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    debounceTimerRef.current = setTimeout(() => {
+      flushDirtyAnswers();
+    }, 800);
+  };
+
+  // Immediate flush before switching questions
+  const handleNavigate = (newIndex: number) => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    if (dirtyKeysRef.current.size > 0) {
+      flushDirtyAnswers();
+    }
+    setIndex(newIndex);
+  };
+
+  // Pre-submission review modal trigger
+  const handleOpenSubmitReview = async () => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    if (dirtyKeysRef.current.size > 0) {
+      await flushDirtyAnswers();
+    }
+    setSubmitError("");
+    setShowReviewModal(true);
+  };
+
+  // Confirmed final submit sequence: Save -> Verify -> Submit
+  const handleFinalSubmit = async () => {
+    if (!attempt || submitting) return;
+    setSubmitting(true);
+    setSubmitError("");
+
+    try {
+      // 1. FINAL PERSISTENCE of latest UI answer state
+      setSubmitStage("saving");
+      await saveAllAnswers(attempt.id, answersRef.current);
+
+      Object.entries(answersRef.current).forEach(([qid, val]) => {
+        lastSavedAnswerRef.current[qid] = val;
+        dirtyKeysRef.current.delete(qid);
+      });
+      setSaveStatus("saved");
+
+      // 2. PERSISTENCE VERIFICATION
+      setSubmitStage("verifying");
+      const verification = await verifyAttemptAnswers(attempt.id, answersRef.current);
+      if (!verification.verified) {
+        throw new Error(
+          `Some answers could not be verified in the database (${verification.missingQuestionIds.length} question(s) unconfirmed). Please check your connection and try again.`
+        );
+      }
+
+      // 3. ATOMIC SUBMISSION STATUS TRANSITION
+      setSubmitStage("submitting");
       await submitAttempt(attempt.id, attempt.startedAt);
+
+      setShowReviewModal(false);
       router.push("/agent/dashboard");
     } catch (err) {
-      console.error("Failed to submit attempt", err);
-      setError(err instanceof Error ? err.message : "Couldn't submit your exam. Please retry.");
-    } finally {
+      console.error("Failed to finalize submission", err);
+      const msg = err instanceof Error ? err.message : "Submission failed. Please check your network and try again.";
+      setSubmitError(msg);
+      setSubmitStage("idle");
       setSubmitting(false);
     }
-  }
+  };
 
-  if (loading || !exam || !current) {
+  if (loading || !exam || questions.length === 0) {
     if (error) {
-      return <div className="mx-auto max-w-2xl rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">{error}</div>;
+      return (
+        <div className="mx-auto max-w-2xl rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          {error}
+        </div>
+      );
     }
     return (
       <div className="flex min-h-[50vh] items-center justify-center">
@@ -152,28 +262,68 @@ export function TakeExam({ examId }: { examId: string }) {
     );
   }
 
+  const current = questions[index];
   const progress = ((index + 1) / questions.length) * 100;
 
   return (
     <div className="mx-auto max-w-2xl">
-      {error && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>}
-      <div className="mb-4">
-        <div className="mb-1 flex items-center justify-between text-sm text-slate-500">
-          <span>Question {index + 1} of {questions.length}</span>
-          <span className="capitalize">
-            {saveStatus === "saving" ? "Saving..." : saveStatus === "saved" ? "Saved" : ""}
-          </span>
+      {error && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+          {error}
         </div>
+      )}
+
+      {/* Progress & Autosave Status Header */}
+      <div className="mb-4">
+        <div className="mb-1.5 flex items-center justify-between text-sm">
+          <span className="text-slate-500">
+            Question {index + 1} of {questions.length}
+          </span>
+
+          {/* Unobtrusive Save Indicator */}
+          <div className="flex items-center">
+            {saveStatus === "saving" && (
+              <span className="flex items-center gap-1.5 text-xs font-medium text-brand-600 dark:text-brand-400">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Saving...
+              </span>
+            )}
+            {saveStatus === "saved" && (
+              <span className="flex items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                <Check className="h-3.5 w-3.5" />
+                All changes saved
+              </span>
+            )}
+            {saveStatus === "error" && (
+              <span className="flex items-center gap-1 text-xs font-medium text-rose-600 dark:text-rose-400">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                Changes not saved
+                <button
+                  type="button"
+                  onClick={() => flushDirtyAnswers()}
+                  className="ml-1 font-semibold underline hover:text-rose-700"
+                >
+                  Retry
+                </button>
+              </span>
+            )}
+            {saveStatus === "idle" && (
+              <span className="text-xs text-slate-400">All changes saved</span>
+            )}
+          </div>
+        </div>
+
         <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
           <div className="h-full bg-brand-600 transition-all" style={{ width: `${progress}%` }} />
         </div>
       </div>
 
+      {/* Question Card */}
       <div className="card p-6">
         <div className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <p className="text-xs font-semibold uppercase tracking-wide text-brand-700 dark:text-brand-300">
-              {current.module} · {current.feature}
+              {current.module} · {current.topic || current.feature}
             </p>
             {attempt && attempt.attemptNumber > 1 && (
               <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-semibold text-brand-700 dark:bg-brand-950/40 dark:text-brand-300">
@@ -193,25 +343,57 @@ export function TakeExam({ examId }: { examId: string }) {
         <AnswerInput
           question={current}
           value={answers[current.id] ?? ""}
-          onChange={(v) => setAnswers((prev) => ({ ...prev, [current.id]: v }))}
+          onChange={(v) => handleAnswerChange(current.id, v)}
         />
       </div>
 
-      <div className="mt-4 flex justify-between">
-        <button className="btn-secondary" disabled={index === 0} onClick={() => setIndex((i) => i - 1)}>
+      {/* Navigation and Submit Buttons */}
+      <div className="mt-4 flex items-center justify-between">
+        <button
+          type="button"
+          className="btn-secondary text-xs"
+          disabled={index === 0}
+          onClick={() => handleNavigate(index - 1)}
+        >
           <ChevronLeft className="mr-1 h-4 w-4" /> Previous
         </button>
-        {index < questions.length - 1 ? (
-          <button className="btn-primary" onClick={() => setIndex((i) => i + 1)}>
-            Next <ChevronRight className="ml-1 h-4 w-4" />
-          </button>
-        ) : (
-          <button className="btn-primary" onClick={handleSubmit} disabled={submitting}>
-            {submitting ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Check className="mr-1.5 h-4 w-4" />}
-            Submit exam
-          </button>
-        )}
+
+        <div className="flex items-center gap-2">
+          {index < questions.length - 1 ? (
+            <button
+              type="button"
+              className="btn-primary text-xs"
+              onClick={() => handleNavigate(index + 1)}
+            >
+              Next <ChevronRight className="ml-1 h-4 w-4" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn-primary text-xs"
+              onClick={handleOpenSubmitReview}
+              disabled={submitting}
+            >
+              <Send className="mr-1.5 h-3.5 w-3.5" />
+              Submit Exam
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* Pre-Submission Review Modal */}
+      <PreSubmissionModal
+        open={showReviewModal}
+        questions={questions}
+        answers={answers}
+        onClose={() => {
+          if (!submitting) setShowReviewModal(false);
+        }}
+        onConfirmSubmit={handleFinalSubmit}
+        submitStage={submitStage}
+        errorMessage={submitError}
+        onJumpToQuestion={(targetIdx) => handleNavigate(targetIdx)}
+      />
     </div>
   );
 }

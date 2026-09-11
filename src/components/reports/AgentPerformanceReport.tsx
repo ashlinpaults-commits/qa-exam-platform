@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import type { AgentPerformanceReportData, AgentExamPerformance } from "@/lib/agentReports";
 import { formatTimeTaken, exportAgentReportsToExcel } from "@/lib/agentReports";
 import { exportAgentReportsToPdf } from "@/lib/agentReportPdf";
@@ -286,7 +286,7 @@ export function AgentPerformanceReport({
    AGENT DETAIL REPORT (SHARED BETWEEN SCREEN & PRINT)
    ========================================================= */
 
-function AgentDetailReport({
+export function AgentDetailReport({
   report,
   isPrint = false,
   expandedExamIds = new Set(),
@@ -297,6 +297,17 @@ function AgentDetailReport({
   expandedExamIds?: Set<string>;
   onToggleExamExpand?: (examId: string) => void;
 }) {
+  const [expandedQuestionIds, setExpandedQuestionIds] = useState<Set<string>>(new Set());
+
+  function toggleQuestionExpand(qId: string) {
+    setExpandedQuestionIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(qId)) next.delete(qId);
+      else next.add(qId);
+      return next;
+    });
+  }
+
   const {
     summary,
     examPerformances,
@@ -305,6 +316,40 @@ function AgentDetailReport({
     coaching,
     progression,
   } = report;
+
+  // Sort modules with loss of points (< 100%) on top, lowest score first; 100% at bottom
+  const sortedModuleCompetencies = useMemo(() => {
+    return [...(competency.moduleCompetency || [])].sort((a, b) => {
+      const aHasLoss = a.score < 100;
+      const bHasLoss = b.score < 100;
+      if (aHasLoss && !bHasLoss) return -1;
+      if (!aHasLoss && bHasLoss) return 1;
+      if (a.score !== b.score) {
+        return a.score - b.score;
+      }
+      if ((b.weakQuestions ?? 0) !== (a.weakQuestions ?? 0)) {
+        return (b.weakQuestions ?? 0) - (a.weakQuestions ?? 0);
+      }
+      return a.module.localeCompare(b.module);
+    });
+  }, [competency.moduleCompetency]);
+
+  // Sort topics with loss of points (< 100%) on top, lowest score first; 100% at bottom
+  const sortedTopicCompetencies = useMemo(() => {
+    return [...(competency.topicCompetency || [])].sort((a, b) => {
+      const aHasLoss = a.score < 100;
+      const bHasLoss = b.score < 100;
+      if (aHasLoss && !bHasLoss) return -1;
+      if (!aHasLoss && bHasLoss) return 1;
+      if (a.score !== b.score) {
+        return a.score - b.score;
+      }
+      if ((b.weakQuestions ?? 0) !== (a.weakQuestions ?? 0)) {
+        return (b.weakQuestions ?? 0) - (a.weakQuestions ?? 0);
+      }
+      return a.topic.localeCompare(b.topic);
+    });
+  }, [competency.topicCompetency]);
 
   return (
     <div className="space-y-6">
@@ -541,7 +586,7 @@ function AgentDetailReport({
                 <tr>
                   <th className="px-6 py-3 print:px-3 print:py-2">Question</th>
                   <th className="px-4 py-3 print:px-2 print:py-2">Module</th>
-                  <th className="px-4 py-3 print:px-2 print:py-2">Feature</th>
+                  <th className="px-4 py-3 print:px-2 print:py-2">Topic</th>
                   <th className="px-4 py-3 print:px-2 print:py-2 text-center">Attempts</th>
                   <th className="px-4 py-3 print:px-2 print:py-2 text-center">Incorrect</th>
                   <th className="px-4 py-3 print:px-2 print:py-2">Rate</th>
@@ -564,14 +609,37 @@ function AgentDetailReport({
                           </span>
                         </div>
                       ) : (
-                        <div>
-                          <QuestionContent
-                            content={q.questionText}
-                            className="text-sm font-medium text-slate-900 dark:text-slate-100 print:text-slate-900 print:text-xs leading-snug"
-                          />
-                          <span className="text-[10px] font-mono text-slate-400 block mt-1">
-                            ID: {q.questionId}
-                          </span>
+                        <div className="space-y-1">
+                          <div
+                            onClick={!isPrint ? () => toggleQuestionExpand(q.questionId) : undefined}
+                            className={!isPrint && !expandedQuestionIds.has(q.questionId) ? "line-clamp-2 cursor-pointer" : ""}
+                          >
+                            <QuestionContent
+                              content={q.questionText}
+                              className="text-sm font-medium text-slate-900 dark:text-slate-100 print:text-slate-900 print:text-xs leading-snug"
+                            />
+                          </div>
+                          {!isPrint && (
+                            <div className="flex items-center justify-between pt-0.5">
+                              <span className="text-[10px] font-mono text-slate-400">
+                                ID: {q.questionId}
+                              </span>
+                              {q.questionText && q.questionText.length > 70 && (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleQuestionExpand(q.questionId)}
+                                  className="text-[11px] font-medium text-brand-600 hover:text-brand-700 hover:underline dark:text-brand-400"
+                                >
+                                  {expandedQuestionIds.has(q.questionId) ? "Show less" : "Show full"}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                          {isPrint && (
+                            <span className="text-[10px] font-mono text-slate-400 block mt-1">
+                              ID: {q.questionId}
+                            </span>
+                          )}
                         </div>
                       )}
                       {q.knowledgeGapCategory && (
@@ -580,11 +648,11 @@ function AgentDetailReport({
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap text-slate-600 dark:text-slate-300 print:text-slate-800">
+                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap text-slate-600 dark:text-slate-300 print:text-slate-800 font-medium">
                       {q.module}
                     </td>
-                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap text-slate-500 text-xs">
-                      {q.feature}
+                    <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap text-slate-700 dark:text-slate-200 text-xs font-semibold">
+                      {q.topic || q.feature}
                     </td>
                     <td className="px-4 py-3.5 print:px-2 print:py-2.5 text-center font-medium">
                       {q.timesAttempted}
@@ -611,11 +679,11 @@ function AgentDetailReport({
                     <td className="px-4 py-3.5 print:px-2 print:py-2.5 whitespace-nowrap">
                       {q.eventuallyMastered ? (
                         <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400 print:text-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded-full">
-                          <CheckCircle2 className="h-3 w-3" /> Resolved
+                          <CheckCircle2 className="h-3 w-3" /> Recently Mastered
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600 dark:text-rose-400 print:text-rose-700 bg-rose-50 dark:bg-rose-950/40 px-2 py-0.5 rounded-full">
-                          <AlertTriangle className="h-3 w-3" /> Unresolved
+                          <AlertTriangle className="h-3 w-3" /> Active Weakness
                         </span>
                       )}
                     </td>
@@ -645,11 +713,11 @@ function AgentDetailReport({
             </span>
           </div>
 
-          {competency.moduleCompetency.length === 0 ? (
+          {sortedModuleCompetencies.length === 0 ? (
             <p className="mt-6 text-sm text-slate-400">No module competency data available.</p>
           ) : (
             <div className="mt-4 space-y-3.5">
-              {competency.moduleCompetency.map((mod) => (
+              {sortedModuleCompetencies.map((mod) => (
                 <div key={mod.module}>
                   <div className="flex items-center justify-between text-xs">
                     <span className="font-medium text-slate-700 dark:text-slate-200 print:text-slate-800">
@@ -679,6 +747,51 @@ function AgentDetailReport({
                   </div>
                 </div>
               ))}
+
+              {/* Topic Competency Breakdown */}
+              {sortedTopicCompetencies && sortedTopicCompetencies.length > 0 && (
+                <div className="mt-6 border-t border-slate-100 pt-4 dark:border-slate-800/80">
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500 print:text-slate-700">
+                      Topic Breakdown
+                    </h4>
+                    <span className="text-[11px] text-slate-400">
+                      {sortedTopicCompetencies.length} topics
+                    </span>
+                  </div>
+                  <div className="space-y-2.5">
+                    {sortedTopicCompetencies.slice(0, 6).map((top) => (
+                      <div key={`${top.module}-${top.topic}`}>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-medium text-slate-700 dark:text-slate-200 print:text-slate-800">
+                            {top.topic}{" "}
+                            <span className="text-[10px] text-slate-400 font-normal">({top.module})</span>
+                          </span>
+                          <span
+                            className={`font-bold ${
+                              top.score >= 80
+                                ? "text-emerald-600 dark:text-emerald-400 print:text-emerald-700"
+                                : top.score >= 60
+                                ? "text-brand-600 dark:text-brand-400 print:text-brand-700"
+                                : "text-rose-600 dark:text-rose-400 print:text-rose-700"
+                            }`}
+                          >
+                            {top.score}%
+                          </span>
+                        </div>
+                        <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800 print:bg-slate-200">
+                          <div
+                            className={`h-full rounded-full ${
+                              top.score >= 80 ? "bg-emerald-500" : top.score >= 60 ? "bg-brand-500" : "bg-rose-500"
+                            }`}
+                            style={{ width: `${Math.min(100, Math.max(0, top.score))}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -743,28 +856,44 @@ function AgentDetailReport({
             </div>
           </div>
 
-          {/* Strongest & Weakest Modules Callout */}
+          {/* Strongest & Weakest Business Topics Callout */}
           <div className="mt-6 grid grid-cols-2 gap-3 pt-4 border-t border-slate-100 dark:border-slate-800 print:border-slate-200 text-xs">
             <div className="rounded-lg bg-emerald-50/60 p-3 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/40 print:border-emerald-200 print:bg-emerald-50">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
-                Strongest Area
+                Strongest Topic
               </p>
               <p className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100 print:text-slate-900">
-                {competency.strongestModule ? competency.strongestModule.module : "N/A"}
+                {competency.strongestTopic
+                  ? competency.strongestTopic.topic
+                  : competency.strongestModule
+                  ? competency.strongestModule.module
+                  : "N/A"}
               </p>
-              <p className="text-emerald-600 dark:text-emerald-400 print:text-emerald-700 font-medium">
-                {competency.strongestModule ? `${competency.strongestModule.score}%` : "—"}
+              <p className="text-emerald-600 dark:text-emerald-400 print:text-emerald-700 font-medium mt-0.5">
+                {competency.strongestTopic
+                  ? `${competency.strongestTopic.score}% · ${competency.strongestTopic.module}`
+                  : competency.strongestModule
+                  ? `${competency.strongestModule.score}%`
+                  : "—"}
               </p>
             </div>
             <div className="rounded-lg bg-rose-50/60 p-3 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/40 print:border-rose-200 print:bg-rose-50">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-rose-700 dark:text-rose-400">
-                Weakest Area
+                Weakest Topic
               </p>
               <p className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100 print:text-slate-900">
-                {competency.weakestModule ? competency.weakestModule.module : "N/A"}
+                {competency.weakestTopic
+                  ? competency.weakestTopic.topic
+                  : competency.weakestModule
+                  ? competency.weakestModule.module
+                  : "N/A"}
               </p>
-              <p className="text-rose-600 dark:text-rose-400 print:text-rose-700 font-medium">
-                {competency.weakestModule ? `${competency.weakestModule.score}%` : "—"}
+              <p className="text-rose-600 dark:text-rose-400 print:text-rose-700 font-medium mt-0.5">
+                {competency.weakestTopic
+                  ? `${competency.weakestTopic.score}% · ${competency.weakestTopic.module}`
+                  : competency.weakestModule
+                  ? `${competency.weakestModule.score}%`
+                  : "—"}
               </p>
             </div>
           </div>

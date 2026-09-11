@@ -8,6 +8,13 @@ import { QuestionForm } from "./QuestionForm";
 import { ExcelImportModal } from "./ExcelImportModal";
 import { QuestionContent } from "./QuestionContent";
 import {
+  CONTROLLED_MODULES,
+  ControlledModule,
+  MODULE_TOPICS,
+  TopicDefinition,
+  normalizeLegacyModule,
+} from "@/config/taxonomy";
+import {
   Search,
   Plus,
   Upload,
@@ -126,14 +133,25 @@ export function QuestionBankBrowser({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const modules = useMemo(
-    () => Array.from(new Set(allQuestions.map((q) => q.module).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
-    [allQuestions]
-  );
+  const modules = useMemo(() => {
+    return Array.from(CONTROLLED_MODULES);
+  }, []);
 
   const features = useMemo(() => {
-    const source = module ? allQuestions.filter((q) => q.module === module) : allQuestions;
-    return Array.from(new Set(source.map((q) => q.feature).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+    const controlledTopics = module
+      ? (MODULE_TOPICS[normalizeLegacyModule(module)] || []).map((t: TopicDefinition) => t.name)
+      : Object.values(MODULE_TOPICS).flatMap((list: TopicDefinition[]) => list.map((t: TopicDefinition) => t.name));
+
+    const source = module
+      ? allQuestions.filter(
+          (q) => normalizeLegacyModule(q.module) === normalizeLegacyModule(module)
+        )
+      : allQuestions;
+
+    const fromQuestions = source
+      .map((q) => (q.topic || q.feature || "").trim())
+      .filter((t) => Boolean(t) && !/^(0109|0209|0909|Sheet1)/i.test(t));
+    return Array.from(new Set([...controlledTopics, ...fromQuestions])).sort((a, b) => a.localeCompare(b));
   }, [allQuestions, module]);
 
   const reviewers = useMemo(() => {
@@ -153,8 +171,13 @@ export function QuestionBankBrowser({
     const wantedNo = normalize(questionNo);
 
     return allQuestions.filter((q) => {
-      if (module && q.module !== module) return false;
-      if (feature && q.feature !== feature) return false;
+      if (
+        module &&
+        normalizeLegacyModule(q.module) !== normalizeLegacyModule(module)
+      ) {
+        return false;
+      }
+      if (feature && (q.topic || q.feature) !== feature) return false;
       if (difficulty && q.difficulty !== difficulty) return false;
       if (type && q.type !== type) return false;
       if (reviewer && getReviewer(q) !== reviewer) return false;
@@ -407,8 +430,8 @@ export function QuestionBankBrowser({
             >
               <div className="min-w-0 flex-1">
                 <div className="mb-1 flex flex-wrap items-center gap-1.5">
-                  <Badge color="brand">{q.module}</Badge>
-                  <Badge>{q.feature}</Badge>
+                  <Badge color="brand">{normalizeLegacyModule(q.module)}</Badge>
+                  <Badge>{q.topic || q.feature}</Badge>
                   <Badge color={DIFF_COLOR[q.difficulty]}>{q.difficulty}</Badge>
                 </div>
                 <p className="line-clamp-2 text-xs text-slate-700 dark:text-slate-200">{q.questionText}</p>
@@ -467,8 +490,10 @@ export function QuestionBankBrowser({
                       {/* Module & Topic */}
                       <td className="whitespace-nowrap px-3 py-3">
                         <div className="flex flex-col gap-0.5">
-                          <span className="font-semibold text-slate-800 dark:text-slate-100">{q.module}</span>
-                          <span className="text-[11px] text-slate-400">{q.feature}</span>
+                          <span className="font-semibold text-slate-800 dark:text-slate-100">
+                            {normalizeLegacyModule(q.module)}
+                          </span>
+                          <span className="text-[11px] text-slate-400">{q.topic || q.feature}</span>
                         </div>
                       </td>
 

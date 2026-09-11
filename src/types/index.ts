@@ -7,6 +7,7 @@ export interface AppUser {
   role: UserRole;
   photoURL?: string;
   streamId?: string;
+  batch?: string;
   assignedTrainerId?: string;
   createdAt: number;
 }
@@ -25,6 +26,7 @@ export interface Question {
   id: string;
   module: string;
   feature: string;
+  topic?: string;
   difficulty: Difficulty;
   tags: string[];
   type: QuestionType;
@@ -35,6 +37,13 @@ export interface Question {
   // "<module>::<Question No.>" from the source spreadsheet, when available.
   // Used to detect duplicates across separate import runs.
   sourceId?: string;
+
+  // Preserves pre-migration classification for auditability and full rollback
+  legacyClassification?: {
+    module?: string;
+    feature?: string;
+    migratedAt?: number;
+  };
 
   // Normalized substantive content fingerprint for cross-exam deduplication
   fingerprint?: string;
@@ -103,6 +112,10 @@ export interface Exam {
   // Reattempt authorizations granted by auditors per agent
   reattemptPermissions?: Record<string, ReattemptPermission>;
   batchId?: string;
+  batch?: string;
+  module?: string;
+  assessmentType?: string;
+  testNumber?: number;
   moduleScope?: string[];
   timeLimitMinutes?: number;
   createdBy: string;
@@ -363,6 +376,7 @@ export interface QuestionMasteryRecord {
   questionText: string;
   module: string;
   feature: string;
+  topic?: string;
   maxMarks: number;
   bestMarks: number;
   isMastered: boolean;

@@ -32,6 +32,7 @@ interface AgentReportGeneratorProps {
   buttonLabel?: string;
   className?: string;
   variant?: "primary" | "secondary" | "card";
+  id?: string;
 }
 
 export function AgentReportGenerator({
@@ -43,6 +44,7 @@ export function AgentReportGenerator({
   buttonLabel = "Generate Agent Report",
   className = "",
   variant = "primary",
+  id,
 }: AgentReportGeneratorProps) {
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [loadingUsers, setLoadingUsers] = useState(false);
@@ -174,6 +176,7 @@ export function AgentReportGenerator({
         </button>
       ) : (
         <button
+          id={id}
           type="button"
           onClick={handleOpenSelector}
           disabled={loadingUsers || generating}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useParams } from "next/navigation";
 import { fetchExams } from "@/lib/exams";
 import {
   fetchAttemptsForExam,
@@ -51,10 +52,12 @@ const KNOWLEDGE_GAPS: KnowledgeGapCategory[] = [
 
 export function ReviewScreen() {
   const { profile } = useAuth();
+  const params = useParams();
+  const routeExamId = typeof params?.examId === "string" ? params.examId : "";
 
   const [exams, setExams] = useState<Exam[]>([]);
   const [users, setUsers] = useState<AppUser[]>([]);
-  const [selectedExam, setSelectedExam] = useState("");
+  const [selectedExam, setSelectedExam] = useState(routeExamId);
   const [attempts, setAttempts] = useState<ExamAttempt[]>([]);
   const [questionCache, setQuestionCache] = useState<
     Record<string, Question>

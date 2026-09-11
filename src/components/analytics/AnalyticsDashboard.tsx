@@ -13,12 +13,15 @@ import {
   UserCheck,
   Users,
   X,
+  FileDown,
+  FileSpreadsheet,
 } from "lucide-react";
 
 import { fetchExams } from "@/lib/exams";
 import { fetchAttemptsForExam } from "@/lib/attempts";
 import { fetchAllQuestions } from "@/lib/questions";
 import { fetchAllUsers } from "@/lib/users";
+import { normalizeLegacyModule } from "@/config/taxonomy";
 
 import {
   calculateAllAgentCompetencies,
@@ -39,8 +42,16 @@ import type {
 import { EmptyState } from "@/components/ui/Primitives";
 import { MetricInfo } from "@/components/ui/MetricInfo";
 import { AgentReportGenerator } from "@/components/reports/AgentReportGenerator";
-import { AgentPerformanceReport } from "@/components/reports/AgentPerformanceReport";
-import type { AgentPerformanceReportData } from "@/lib/agentReports";
+import {
+  AgentPerformanceReport,
+  AgentDetailReport,
+} from "@/components/reports/AgentPerformanceReport";
+import {
+  buildAgentPerformanceReport,
+  exportAgentReportsToExcel,
+  type AgentPerformanceReportData,
+} from "@/lib/agentReports";
+import { exportAgentReportsToPdf } from "@/lib/agentReportPdf";
 
 /*
  * Session-scoped cache for this dashboard's combined dataset. Lives outside
@@ -72,6 +83,66 @@ export function AnalyticsDashboard() {
   const [selectedModule, setSelectedModule] = useState<string | null>(null);
   const [activeReportData, setActiveReportData] =
     useState<AgentPerformanceReportData[] | null>(null);
+
+  const [activeTab, setActiveTab] = useState<"overview" | "agent">("overview");
+  const [selectedAgentId, setSelectedAgentId] = useState<string>("");
+  const [expandedExamIds, setExpandedExamIds] = useState<Set<string>>(new Set());
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
+
+  const agentsList = useMemo(() => {
+    return users
+      .filter((u) => u.role === "agent")
+      .sort((a, b) => (a.name || a.email || "").localeCompare(b.name || b.email || ""));
+  }, [users]);
+
+  const currentAgentReport = useMemo(() => {
+    if (!selectedAgentId) return null;
+    const agent = users.find((u) => u.uid === selectedAgentId);
+    if (!agent) return null;
+    const agentAttempts = attempts.filter((att) => att.agentId === selectedAgentId);
+    return buildAgentPerformanceReport({
+      agent,
+      exams,
+      attempts: agentAttempts,
+      questions,
+    });
+  }, [selectedAgentId, users, attempts, exams, questions]);
+
+  function toggleExamExpand(examId: string) {
+    setExpandedExamIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(examId)) next.delete(examId);
+      else next.add(examId);
+      return next;
+    });
+  }
+
+  function handleExportCurrentPdf() {
+    if (!currentAgentReport) return;
+    try {
+      setExportingPdf(true);
+      const filename = `${(currentAgentReport.agent.name || "Agent").replace(/\s+/g, "_")}_Performance_Report.pdf`;
+      exportAgentReportsToPdf([currentAgentReport], filename);
+    } catch (err) {
+      console.error("Failed to export PDF:", err);
+    } finally {
+      setExportingPdf(false);
+    }
+  }
+
+  function handleExportCurrentExcel() {
+    if (!currentAgentReport) return;
+    try {
+      setExportingExcel(true);
+      const filename = `${(currentAgentReport.agent.name || "Agent").replace(/\s+/g, "_")}_Performance_Report.xlsx`;
+      exportAgentReportsToExcel([currentAgentReport], filename);
+    } catch (err) {
+      console.error("Failed to export Excel:", err);
+    } finally {
+      setExportingExcel(false);
+    }
+  }
 
   useEffect(() => {
     async function load() {
@@ -298,6 +369,7 @@ const coachingCounts = useMemo(
       marks: number;
       maxMarks: number;
       questions: number;
+      topicMap: Map<string, { marks: number; maxMarks: number; questions: number }>;
     }
   >();
 
@@ -305,17 +377,28 @@ const coachingCounts = useMemo(
     const question = questionMap.get(answer.questionId);
     if (!question) return;
 
-    const current = moduleMap.get(question.module) ?? {
+    const normModule = normalizeLegacyModule(question.module);
+    const normTopic = (question.topic || question.feature || "General").trim();
+
+    const current = moduleMap.get(normModule) ?? {
       marks: 0,
       maxMarks: 0,
       questions: 0,
+      topicMap: new Map(),
     };
 
     current.marks += answer.marks;
     current.maxMarks += answer.maxMarks;
     current.questions += 1;
 
-    moduleMap.set(question.module, current);
+    // Track topic breakdown
+    const currentTopic = current.topicMap.get(normTopic) ?? { marks: 0, maxMarks: 0, questions: 0 };
+    currentTopic.marks += answer.marks;
+    currentTopic.maxMarks += answer.maxMarks;
+    currentTopic.questions += 1;
+    current.topicMap.set(normTopic, currentTopic);
+
+    moduleMap.set(normModule, current);
   });
 
   const modulePerformance = Array.from(moduleMap.entries())
@@ -328,8 +411,35 @@ const coachingCounts = useMemo(
             )
           : 0,
       questions: value.questions,
+      topics: Array.from(value.topicMap.entries())
+        .map(([topic, tVal]) => ({
+          topic,
+          score: tVal.maxMarks > 0 ? Math.round((tVal.marks / tVal.maxMarks) * 100) : 0,
+          questions: tVal.questions,
+        }))
+        .sort((a, b) => {
+          // Show topics with loss of points (< 100%) on top, lowest score first; 100% at bottom
+          const aHasLoss = a.score < 100;
+          const bHasLoss = b.score < 100;
+          if (aHasLoss && !bHasLoss) return -1;
+          if (!aHasLoss && bHasLoss) return 1;
+          if (a.score !== b.score) {
+            return a.score - b.score;
+          }
+          return a.topic.localeCompare(b.topic);
+        }),
     }))
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => {
+      // Show modules with loss of points (< 100%) on top, lowest score first; 100% at bottom
+      const aHasLoss = a.score < 100;
+      const bHasLoss = b.score < 100;
+      if (aHasLoss && !bHasLoss) return -1;
+      if (!aHasLoss && bHasLoss) return 1;
+      if (a.score !== b.score) {
+        return a.score - b.score;
+      }
+      return a.module.localeCompare(b.module);
+    });
 
   /* =========================================================
      FREQUENTLY MISSED QUESTIONS
@@ -362,7 +472,8 @@ const coachingCounts = useMemo(
       return {
         questionId: question.id,
         questionText: question.questionText,
-        module: question.module,
+        module: normalizeLegacyModule(question.module),
+        topic: (question.topic || question.feature || "General").trim(),
         asked,
         missed,
         missPct: Math.round(incorrectPct),
@@ -406,6 +517,111 @@ const coachingCounts = useMemo(
             buttonLabel="Generate Agent Report"
           />
         </div>
+
+        {/* VIEW NAVIGATION TABS */}
+        <div className="flex border-b border-slate-200 dark:border-slate-800">
+          <button
+            type="button"
+            onClick={() => setActiveTab("overview")}
+            className={`border-b-2 px-5 py-2.5 text-sm font-semibold transition ${
+              activeTab === "overview"
+                ? "border-brand-600 text-brand-600 dark:border-brand-400 dark:text-brand-400"
+                : "border-transparent text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+            }`}
+          >
+            Team Overview
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab("agent");
+              if (!selectedAgentId && agentsList.length > 0) {
+                setSelectedAgentId(agentsList[0].uid);
+              }
+            }}
+            className={`border-b-2 px-5 py-2.5 text-sm font-semibold transition ${
+              activeTab === "agent"
+                ? "border-brand-600 text-brand-600 dark:border-brand-400 dark:text-brand-400"
+                : "border-transparent text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+            }`}
+          >
+            Agent Analysis
+          </button>
+        </div>
+
+        {activeTab === "agent" ? (
+          <div className="space-y-6">
+            {/* AGENT SELECTOR BAR & QUICK EXPORT ACTIONS */}
+            <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                  Select Agent:
+                </span>
+                <div className="relative min-w-[260px]">
+                  <select
+                    id="agent-analysis-select"
+                    value={selectedAgentId}
+                    onChange={(e) => setSelectedAgentId(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-3.5 pr-8 text-sm font-semibold text-slate-800 shadow-sm transition hover:border-slate-300 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    <option value="">-- Select an Agent --</option>
+                    {agentsList.map((a) => (
+                      <option key={a.uid} value={a.uid}>
+                        {a.name || a.email || a.uid} {a.name && a.email ? `(${a.email})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {currentAgentReport && (
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={handleExportCurrentPdf}
+                    disabled={exportingPdf}
+                    className="btn-primary inline-flex items-center gap-1.5 text-xs shadow-sm"
+                    title="Export vector PDF report"
+                  >
+                    <FileDown className="h-3.5 w-3.5" />
+                    {exportingPdf ? "Generating PDF..." : "Export PDF"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleExportCurrentExcel}
+                    disabled={exportingExcel}
+                    className="btn-secondary inline-flex items-center gap-1.5 text-xs shadow-sm"
+                    title="Export Excel spreadsheet"
+                  >
+                    <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                    {exportingExcel ? "Exporting..." : "Export Excel"}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* AGENT DETAIL REPORT DISPLAY */}
+            {!selectedAgentId ? (
+              <EmptyState
+                title="No agent selected"
+                subtitle="Select an agent from the dropdown above to view their comprehensive assessment scorecard, attempt progression, and topic competency."
+              />
+            ) : !currentAgentReport ? (
+              <EmptyState
+                title="Agent data unavailable"
+                subtitle="Could not find assessment records for the selected agent."
+              />
+            ) : (
+              <AgentDetailReport
+                report={currentAgentReport}
+                expandedExamIds={expandedExamIds}
+                onToggleExamExpand={toggleExamExpand}
+              />
+            )}
+          </div>
+        ) : (
+          <>
 
         {/* OPERATIONAL SUMMARY */}
 
@@ -521,9 +737,10 @@ const coachingCounts = useMemo(
                     return (
                       <tr
                         key={competency.agentId}
-                        onClick={() =>
-                          setSelectedAgent(competency)
-                        }
+                        onClick={() => {
+                          setSelectedAgentId(competency.agentId);
+                          setActiveTab("agent");
+                        }}
                         className="cursor-pointer transition hover:bg-slate-50 dark:hover:bg-slate-800/40"
                       >
                         <td className="px-5 py-4">
@@ -694,9 +911,10 @@ const coachingCounts = useMemo(
             (item) =>
               item.agentId === assessment.agentId
           )}
-          onOpenAgent={(competency) =>
-            setSelectedAgent(competency)
-          }
+          onOpenAgent={(competency) => {
+            setSelectedAgentId(competency.agentId);
+            setActiveTab("agent");
+          }}
         />
       ))}
     </div>
@@ -723,10 +941,13 @@ const coachingCounts = useMemo(
           ) : (
             <div className="space-y-4">
               {modulePerformance.map((module) => (
-                <div key={module.module}>
-                  <div className="mb-1.5 flex items-center justify-between gap-4">
+                <div
+                  key={module.module}
+                  className="rounded-xl border border-slate-200/70 bg-slate-50/60 p-3.5 dark:border-slate-800 dark:bg-slate-900/40"
+                >
+                  <div className="mb-2 flex items-center justify-between gap-4">
                     <div>
-                      <p className="text-sm font-medium">
+                      <p className="text-sm font-bold text-slate-900 dark:text-slate-100">
                         {module.module}
                       </p>
 
@@ -735,14 +956,14 @@ const coachingCounts = useMemo(
                       </p>
                     </div>
 
-                    <p className="text-sm font-semibold">
+                    <p className="text-sm font-bold text-brand-600 dark:text-brand-400">
                       {module.score}%
                     </p>
                   </div>
 
-                  <div className="h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
                     <div
-                      className="h-full rounded-full bg-brand-500 transition-all"
+                      className="h-full rounded-full bg-brand-600 transition-all"
                       style={{
                         width: `${Math.min(
                           100,
@@ -751,6 +972,30 @@ const coachingCounts = useMemo(
                       }}
                     />
                   </div>
+
+                  {/* Topic Competency Breakdown */}
+                  {module.topics && module.topics.length > 0 && (
+                    <div className="mt-3.5 border-t border-slate-200/70 pt-2.5 dark:border-slate-800/80">
+                      <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                        Topic Competency Breakdown
+                      </p>
+                      <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                        {module.topics.map((t) => (
+                          <div
+                            key={t.topic}
+                            className="flex items-center justify-between rounded-lg border border-slate-100 bg-white px-2.5 py-1.5 text-xs shadow-2xs dark:border-slate-700/60 dark:bg-slate-800/80"
+                          >
+                            <span className="truncate font-medium text-slate-700 dark:text-slate-300">
+                              {t.topic}
+                            </span>
+                            <span className="ml-2 font-mono font-bold text-slate-900 dark:text-slate-100">
+                              {t.score}%
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -787,6 +1032,9 @@ const coachingCounts = useMemo(
                       Module
                     </th>
                     <th className="px-5 py-3">
+                      Topic
+                    </th>
+                    <th className="px-5 py-3">
                       Asked
                     </th>
                     <th className="px-5 py-3">
@@ -803,15 +1051,19 @@ const coachingCounts = useMemo(
                     <tr key={item.questionId}>
                       <td className="max-w-xl px-5 py-3">
                         <p
-                          className="truncate"
+                          className="line-clamp-2 text-slate-900 dark:text-slate-100"
                           title={item.questionText}
                         >
                           {item.questionText}
                         </p>
                       </td>
 
-                      <td className="px-5 py-3">
+                      <td className="px-5 py-3 font-medium text-slate-700 dark:text-slate-300">
                         {item.module}
+                      </td>
+
+                      <td className="px-5 py-3 text-xs font-semibold text-slate-500 dark:text-slate-400">
+                        {item.topic}
                       </td>
 
                       <td className="px-5 py-3">
@@ -832,6 +1084,8 @@ const coachingCounts = useMemo(
             </div>
           )}
         </section>
+          </>
+        )}
       </div>
 
       {/* AGENT HISTORY MODAL */}

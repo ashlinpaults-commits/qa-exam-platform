@@ -5,6 +5,7 @@ import type {
   AttemptAnswer,
   KnowledgeGapCategory,
 } from "@/types";
+import { normalizeLegacyModule, classifyQuestionTaxonomy } from "@/config/taxonomy";
 
 /* =========================================================
    COMPETENCY TYPES
@@ -24,6 +25,15 @@ export type LearningTrend =
   | "insufficient_data";
 
 export interface ModuleCompetency {
+  module: string;
+  score: number;
+  questionsMeasured: number;
+  correctQuestions: number;
+  weakQuestions: number;
+}
+
+export interface TopicCompetency {
+  topic: string;
   module: string;
   score: number;
   questionsMeasured: number;
@@ -64,6 +74,10 @@ export interface AgentCompetency {
 
   weakestModule?: ModuleCompetency;
   strongestModule?: ModuleCompetency;
+
+  topicCompetency: TopicCompetency[];
+  weakestTopic?: TopicCompetency;
+  strongestTopic?: TopicCompetency;
 
   persistentGaps: PersistentGap[];
 
@@ -187,12 +201,24 @@ export function calculateAgentCompetency({
       : null;
 
   /* =======================================================
-     MODULE COMPETENCY
+     MODULE & TOPIC COMPETENCY (NORMALIZED TAXONOMY)
      ======================================================= */
 
   const moduleMap = new Map<
     string,
     {
+      total: number;
+      max: number;
+      questionsMeasured: number;
+      correctQuestions: number;
+      weakQuestions: number;
+    }
+  >();
+
+  const topicMap = new Map<
+    string,
+    {
+      module: string;
       total: number;
       max: number;
       questionsMeasured: number;
@@ -208,12 +234,42 @@ export function calculateAgentCompetency({
     const question =
       questionMap.get(questionId);
 
-    if (!question) {
-      continue;
+    const rawModule = question?.module || record.answer.questionSnapshot?.module || "General";
+    const normModule = normalizeLegacyModule(rawModule);
+    let cleanTopic = (question?.topic || question?.feature || record.answer.questionSnapshot?.topic || record.answer.questionSnapshot?.feature || "").trim();
+
+    // Eliminate legacy sheet names (0109, 0209, 0909, Sheet1) or empty topics
+    if (
+      !cleanTopic ||
+      cleanTopic.toLowerCase().includes("0909") ||
+      cleanTopic.toLowerCase().includes("0109") ||
+      cleanTopic.toLowerCase().includes("0209") ||
+      cleanTopic.toLowerCase() === "sheet1" ||
+      cleanTopic.toLowerCase() === rawModule.toLowerCase() ||
+      cleanTopic.toLowerCase() === normModule.toLowerCase()
+    ) {
+      const classified = classifyQuestionTaxonomy(
+        question?.questionText || record.answer.questionSnapshot?.questionText || "",
+        question?.expectedAnswer || record.answer.questionSnapshot?.expectedAnswer || "",
+        normModule,
+        cleanTopic
+      );
+      cleanTopic = classified.suggestedTopic;
     }
 
-    const current =
-      moduleMap.get(question.module) ?? {
+    const percentage =
+      getAnswerPercentage(
+        record.answer
+      );
+
+    const isCorrect =
+      percentage !== null &&
+      percentage >=
+        COMPETENCY_THRESHOLDS.correctAnswerPct;
+
+    // 1. Module aggregation
+    const curModule =
+      moduleMap.get(normModule) ?? {
         total: 0,
         max: 0,
         questionsMeasured: 0,
@@ -221,33 +277,36 @@ export function calculateAgentCompetency({
         weakQuestions: 0,
       };
 
-    const percentage =
-      getAnswerPercentage(
-        record.answer
-      );
-
-    current.total +=
-      record.answer.marks ?? 0;
-
-    current.max +=
-      record.answer.maxMarks;
-
-    current.questionsMeasured += 1;
-
-    if (
-      percentage !== null &&
-      percentage >=
-        COMPETENCY_THRESHOLDS.correctAnswerPct
-    ) {
-      current.correctQuestions += 1;
+    curModule.total += record.answer.marks ?? 0;
+    curModule.max += record.answer.maxMarks;
+    curModule.questionsMeasured += 1;
+    if (isCorrect) {
+      curModule.correctQuestions += 1;
     } else {
-      current.weakQuestions += 1;
+      curModule.weakQuestions += 1;
     }
+    moduleMap.set(normModule, curModule);
 
-    moduleMap.set(
-      question.module,
-      current
-    );
+    // 2. Topic aggregation
+    const curTopic =
+      topicMap.get(cleanTopic) ?? {
+        module: normModule,
+        total: 0,
+        max: 0,
+        questionsMeasured: 0,
+        correctQuestions: 0,
+        weakQuestions: 0,
+      };
+
+    curTopic.total += record.answer.marks ?? 0;
+    curTopic.max += record.answer.maxMarks;
+    curTopic.questionsMeasured += 1;
+    if (isCorrect) {
+      curTopic.correctQuestions += 1;
+    } else {
+      curTopic.weakQuestions += 1;
+    }
+    topicMap.set(cleanTopic, curTopic);
   }
 
   const moduleCompetency: ModuleCompetency[] =
@@ -273,22 +332,78 @@ export function calculateAgentCompetency({
         weakQuestions:
           value.weakQuestions,
       }))
-      .sort(
-        (a, b) =>
-          b.score - a.score
-      );
+      .sort((a, b) => {
+        // Show modules with loss of points (< 100%) on top, lowest score first; 100% at bottom
+        const aHasLoss = a.score < 100;
+        const bHasLoss = b.score < 100;
+        if (aHasLoss && !bHasLoss) return -1;
+        if (!aHasLoss && bHasLoss) return 1;
+        if (a.score !== b.score) {
+          return a.score - b.score;
+        }
+        if ((b.weakQuestions ?? 0) !== (a.weakQuestions ?? 0)) {
+          return (b.weakQuestions ?? 0) - (a.weakQuestions ?? 0);
+        }
+        return a.module.localeCompare(b.module);
+      });
 
   const strongestModule =
     moduleCompetency.length > 0
-      ? moduleCompetency[0]
+      ? [...moduleCompetency].sort((a, b) => b.score - a.score)[0]
       : undefined;
 
   const weakestModule =
     moduleCompetency.length > 0
-      ? [...moduleCompetency].sort(
-          (a, b) =>
-            a.score - b.score
-        )[0]
+      ? [...moduleCompetency].sort((a, b) => a.score - b.score)[0]
+      : undefined;
+
+  const topicCompetency: TopicCompetency[] =
+    Array.from(topicMap.entries())
+      .map(([topic, value]) => ({
+        topic,
+        module: value.module,
+
+        score:
+          value.max > 0
+            ? round(
+                (value.total /
+                  value.max) *
+                  100
+              )
+            : 0,
+
+        questionsMeasured:
+          value.questionsMeasured,
+
+        correctQuestions:
+          value.correctQuestions,
+
+        weakQuestions:
+          value.weakQuestions,
+      }))
+      .sort((a, b) => {
+        // Show topics with loss of points (< 100%) on top, lowest score first; 100% at bottom
+        const aHasLoss = a.score < 100;
+        const bHasLoss = b.score < 100;
+        if (aHasLoss && !bHasLoss) return -1;
+        if (!aHasLoss && bHasLoss) return 1;
+        if (a.score !== b.score) {
+          return a.score - b.score;
+        }
+        if ((b.weakQuestions ?? 0) !== (a.weakQuestions ?? 0)) {
+          return (b.weakQuestions ?? 0) - (a.weakQuestions ?? 0);
+        }
+        return a.topic.localeCompare(b.topic);
+      });
+
+  const strongestTopic =
+    topicCompetency.length > 0
+      ? [...topicCompetency].sort((a, b) => b.score - a.score)[0]
+      : undefined;
+
+  const weakestTopic =
+    topicCompetency.length > 0
+      ? [...topicCompetency].sort((a, b) => a.score - b.score)[0]
       : undefined;
 
   /* =======================================================
@@ -374,29 +489,34 @@ export function calculateAgentCompetency({
       continue;
     }
 
+    const rawModule = question.module || "General";
+    const normModule = normalizeLegacyModule(rawModule);
+    let cleanTopic = (question.topic || question.feature || "").trim();
+    if (
+      !cleanTopic ||
+      cleanTopic.toLowerCase().includes("0909") ||
+      cleanTopic.toLowerCase().includes("0109") ||
+      cleanTopic.toLowerCase().includes("0209") ||
+      cleanTopic.toLowerCase() === "sheet1"
+    ) {
+      const classified = classifyQuestionTaxonomy(
+        question.questionText,
+        question.expectedAnswer,
+        normModule,
+        cleanTopic
+      );
+      cleanTopic = classified.suggestedTopic;
+    }
+
     persistentGaps.push({
       questionId,
-
-      questionText:
-        question.questionText,
-
-      module:
-        question.module,
-
-      feature:
-        question.feature,
-
-      timesBelowThreshold:
-        gap.belowThreshold,
-
-      attemptsSeen:
-        gap.attemptsSeen,
-
-      latestScorePct:
-        gap.latestScorePct,
-
-      knowledgeGapCategory:
-        gap.latestCategory,
+      questionText: question.questionText,
+      module: normModule,
+      feature: cleanTopic,
+      timesBelowThreshold: gap.belowThreshold,
+      attemptsSeen: gap.attemptsSeen,
+      latestScorePct: gap.latestScorePct,
+      knowledgeGapCategory: gap.latestCategory,
     });
   }
 
@@ -552,6 +672,12 @@ export function calculateAgentCompetency({
     weakestModule,
 
     strongestModule,
+
+    topicCompetency,
+
+    weakestTopic,
+
+    strongestTopic,
 
     persistentGaps,
 

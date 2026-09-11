@@ -154,8 +154,8 @@ export function ExcelImportModal({ open, onClose, onImported }: { open: boolean;
                 <tbody>
                   {parsed.rows.slice(0, 50).map((r, i) => (
                     <tr key={i} className="border-t border-slate-100 dark:border-slate-700">
-                      <td className="p-2">{r.module}</td>
-                      <td className="p-2">{r.feature}</td>
+                      <td className="p-2 font-medium text-slate-700 dark:text-slate-200">{r.module}</td>
+                      <td className="p-2 font-medium text-brand-700 dark:text-brand-300">{r.topic || r.feature}</td>
                       <td className="p-2 capitalize">{r.difficulty}</td>
                       <td className="max-w-xs truncate p-2">{r.questionText}</td>
                     </tr>

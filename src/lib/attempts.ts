@@ -59,6 +59,28 @@ export async function fetchAttemptsForExam(
 }
 
 /* =========================================================
+   FETCH PENDING REVIEW ATTEMPTS
+   ========================================================= */
+
+export async function fetchPendingReviewAttempts(): Promise<ExamAttempt[]> {
+  const q = query(
+    collection(db, COL),
+    where("status", "in", ["submitted", "review_in_progress"])
+  );
+
+  const snap = await getDocs(q);
+
+  const list = snap.docs.map((d) =>
+    normalizeAgentAnswers({ id: d.id, ...d.data() } as ExamAttempt)
+  );
+
+  // In-memory sort by submittedAt / startedAt descending (no composite index required)
+  return list.sort(
+    (a, b) => (b.submittedAt || b.startedAt || 0) - (a.submittedAt || a.startedAt || 0)
+  );
+}
+
+/* =========================================================
    FETCH ATTEMPTS FOR AGENT
    ========================================================= */
 
@@ -425,6 +447,94 @@ export async function saveAnswer(
     console.debug(`[saveAnswer] Saved answer for attemptId=${attemptId} questionId=${questionId}`);
   });
   return updated;
+}
+
+/* =========================================================
+   SAVE ALL AGENT ANSWERS (ATOMIC BATCH PERSISTENCE)
+   ========================================================= */
+
+/**
+ * Atomically saves an entire map of agent answers into Firestore.
+ * Merges the provided answers with any existing agentAnswers on the server.
+ * Operates inside a Firestore transaction and touches ONLY `agentAnswers`
+ * to strictly adhere to Firestore security rules.
+ */
+export async function saveAllAnswers(
+  attemptId: string,
+  answersMap: Record<string, string>
+): Promise<void> {
+  const attemptRef = doc(db, COL, attemptId);
+
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(attemptRef);
+    if (!snap.exists()) throw new Error("Attempt not found.");
+    const current = snap.data() as ExamAttempt;
+    if (current.status !== "in_progress") {
+      throw new Error("This attempt is no longer editable.");
+    }
+
+    const serverAnswers = current.agentAnswers ?? {};
+    let hasChanges = false;
+    const merged: Record<string, string> = { ...serverAnswers };
+
+    for (const [qid, ans] of Object.entries(answersMap)) {
+      if (ans !== undefined && ans !== null && serverAnswers[qid] !== ans) {
+        merged[qid] = ans;
+        hasChanges = true;
+      }
+    }
+
+    // Skip unnecessary write if all answers are already identical
+    if (!hasChanges) {
+      console.debug(`[saveAllAnswers] No answer changes to persist for attemptId=${attemptId}`);
+      return;
+    }
+
+    transaction.update(attemptRef, { agentAnswers: merged });
+    console.debug(
+      `[saveAllAnswers] Persisted ${Object.keys(merged).length} answers for attemptId=${attemptId}`
+    );
+  });
+}
+
+/* =========================================================
+   VERIFY PERSISTED ANSWERS
+   ========================================================= */
+
+/**
+ * Reads back the attempt from Firestore and verifies that all non-empty
+ * answers in `expectedAnswers` are actually present in the persisted document.
+ * Returns an object indicating success and any question IDs that failed to persist.
+ */
+export async function verifyAttemptAnswers(
+  attemptId: string,
+  expectedAnswers: Record<string, string>
+): Promise<{ verified: boolean; missingQuestionIds: string[] }> {
+  const attemptRef = doc(db, COL, attemptId);
+  const snap = await getDoc(attemptRef);
+
+  if (!snap.exists()) {
+    return { verified: false, missingQuestionIds: Object.keys(expectedAnswers) };
+  }
+
+  const data = snap.data() as ExamAttempt;
+  const persisted = data.agentAnswers ?? {};
+  const missing: string[] = [];
+
+  for (const [qid, expectedVal] of Object.entries(expectedAnswers)) {
+    // Only check non-empty answers
+    if (expectedVal && expectedVal.trim().length > 0) {
+      const persistedVal = persisted[qid];
+      if (persistedVal === undefined || persistedVal === null || persistedVal !== expectedVal) {
+        missing.push(qid);
+      }
+    }
+  }
+
+  return {
+    verified: missing.length === 0,
+    missingQuestionIds: missing,
+  };
 }
 
 /* =========================================================
@@ -1202,6 +1312,7 @@ export function computeExamMasterScorecard(
       questionText: snap?.questionText || "",
       module: snap?.module || "General",
       feature: snap?.feature || "General",
+      topic: snap?.topic || snap?.feature || "General",
       maxMarks,
       bestMarks: 0,
       isMastered: false,
@@ -1217,13 +1328,14 @@ export function computeExamMasterScorecard(
   let previousMasterScore = 0;
 
   for (const attempt of reviewedAttempts) {
-    const attemptMarks = (attempt.answers || []).reduce((sum, a) => sum + (a.marks ?? 0), 0);
-    const attemptMaxMarks = (attempt.answers || []).reduce((sum, a) => sum + a.maxMarks, 0);
-    const attemptPercentage = attemptMaxMarks > 0 ? Math.round((attemptMarks / attemptMaxMarks) * 1000) / 10 : 0;
+    let attemptMarks = 0;
+    let attemptMaxMarks = 0;
 
-    // Process each question answered in this attempt
     for (const ans of attempt.answers || []) {
       if (ans.marks === undefined) continue;
+
+      attemptMarks += ans.marks;
+      attemptMaxMarks += (ans.maxMarks || 10);
 
       if (!masteryMap.has(ans.questionId)) {
         masteryMap.set(ans.questionId, {
@@ -1231,6 +1343,7 @@ export function computeExamMasterScorecard(
           questionText: ans.questionSnapshot?.questionText || exam.questionSnapshots?.[ans.questionId]?.questionText || "",
           module: ans.questionSnapshot?.module || exam.questionSnapshots?.[ans.questionId]?.module || "General",
           feature: ans.questionSnapshot?.feature || exam.questionSnapshots?.[ans.questionId]?.feature || "General",
+          topic: ans.questionSnapshot?.topic || ans.questionSnapshot?.feature || exam.questionSnapshots?.[ans.questionId]?.topic || "General",
           maxMarks: ans.maxMarks || 10,
           bestMarks: 0,
           isMastered: false,
@@ -1246,6 +1359,7 @@ export function computeExamMasterScorecard(
         rec.questionText = ans.questionSnapshot.questionText;
         rec.module = ans.questionSnapshot.module || rec.module;
         rec.feature = ans.questionSnapshot.feature || rec.feature;
+        rec.topic = ans.questionSnapshot.topic || ans.questionSnapshot.feature || rec.topic;
       }
       rec.maxMarks = ans.maxMarks || rec.maxMarks || 10;
       rec.timesAttempted += 1;
@@ -1279,6 +1393,8 @@ export function computeExamMasterScorecard(
         rec.isMastered = true;
       }
     }
+
+    const attemptPercentage = attemptMaxMarks > 0 ? Math.round((attemptMarks / attemptMaxMarks) * 1000) / 10 : 0;
 
     // Cumulative Master Score at this attempt
     let cumulativeScore = 0;

@@ -6,7 +6,14 @@ import { createQuestion, updateQuestion } from "@/lib/questions";
 import { useAuth } from "@/context/AuthContext";
 import { QuestionContent } from "./QuestionContent";
 import { WordQuestionEditorModal } from "./WordQuestionEditorModal";
-import { Edit3 } from "lucide-react";
+import {
+  CONTROLLED_MODULES,
+  ControlledModule,
+  MODULE_TOPICS,
+  normalizeLegacyModule,
+  classifyQuestionTaxonomy,
+} from "@/config/taxonomy";
+import { Edit3, Sparkles } from "lucide-react";
 
 function friendlyError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -33,8 +40,19 @@ export function QuestionForm({
 }) {
   const { profile } = useAuth();
   const [type, setType] = useState<QuestionType>(existing?.type ?? "descriptive");
-  const [module, setModule] = useState(existing?.module ?? "");
-  const [feature, setFeature] = useState(existing?.feature ?? "");
+
+  // Controlled Module state (normalized from legacy if present)
+  const [module, setModule] = useState<ControlledModule>(() => {
+    if (existing?.module) return normalizeLegacyModule(existing.module);
+    return "RCM & Clinical";
+  });
+
+  // Controlled Topic state
+  const [topic, setTopic] = useState(() => {
+    return existing?.topic || existing?.feature || "";
+  });
+  const [customTopic, setCustomTopic] = useState(false);
+
   const [difficulty, setDifficulty] = useState<Difficulty>(existing?.difficulty ?? "easy");
   const [tags, setTags] = useState(existing?.tags.join(", ") ?? "");
   const [questionText, setQuestionText] = useState(existing?.questionText ?? "");
@@ -48,15 +66,48 @@ export function QuestionForm({
   const [isFormattingOpen, setIsFormattingOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [suggestionNotice, setSuggestionNotice] = useState<string | null>(null);
+
+  // Available topics for selected module
+  const availableTopics = MODULE_TOPICS[module] || [];
+
+  function handleSuggestTopic() {
+    if (!questionText.trim()) {
+      setSuggestionNotice("Please enter some question text first.");
+      setTimeout(() => setSuggestionNotice(null), 3000);
+      return;
+    }
+
+    const result = classifyQuestionTaxonomy(questionText, expectedAnswer, module, topic);
+    setModule(result.suggestedModule);
+    setTopic(result.suggestedTopic);
+    setCustomTopic(false);
+
+    // Merge suggested tags if not already present
+    if (result.suggestedTags.length > 0) {
+      const currentTagsList = tags.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+      const newTags = result.suggestedTags.filter((st) => !currentTagsList.includes(st.toLowerCase()));
+      if (newTags.length > 0) {
+        setTags((prev) => (prev.trim() ? `${prev.trim()}, ${newTags.join(", ")}` : newTags.join(", ")));
+      }
+    }
+
+    setSuggestionNotice(
+      `Suggested: "${result.suggestedTopic}" (${result.confidence} confidence: ${result.reason})`
+    );
+    setTimeout(() => setSuggestionNotice(null), 6000);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!profile) return;
+    const finalTopic = topic.trim() || "General";
     setSaving(true);
     setError("");
     const base = {
       module: module.trim(),
-      feature: feature.trim(),
+      topic: finalTopic,
+      feature: finalTopic, // Maintain feature in sync for 100% backward compatibility
       difficulty,
       tags: tags.split(",").map((t) => t.trim()).filter(Boolean),
       type,
@@ -83,15 +134,77 @@ export function QuestionForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
+      {/* Smart Topic Suggestion Feedback Banner */}
+      {suggestionNotice && (
+        <div className="flex items-center gap-2 rounded-lg border border-brand-200 bg-brand-50/80 px-3 py-2 text-xs font-medium text-brand-900 shadow-sm animate-in fade-in dark:border-brand-800 dark:bg-brand-950/40 dark:text-brand-300">
+          <Sparkles className="h-4 w-4 shrink-0 text-brand-600 dark:text-brand-400" />
+          <span>{suggestionNotice}</span>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3">
+        {/* Controlled Module Dropdown */}
         <div>
           <label className="mb-1 block text-sm font-medium">Module</label>
-          <input className="input" value={module} onChange={(e) => setModule(e.target.value)} required />
+          <select
+            className="input font-medium"
+            value={module}
+            onChange={(e) => {
+              const newMod = e.target.value as ControlledModule;
+              setModule(newMod);
+              // Reset topic if not present in new module
+              const newTopics = MODULE_TOPICS[newMod] || [];
+              if (!newTopics.some((t) => t.name === topic)) {
+                setTopic(newTopics[0]?.name || "");
+              }
+            }}
+            required
+          >
+            {CONTROLLED_MODULES.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
         </div>
+
+        {/* Controlled Topic Dropdown (Filtered by Module) */}
         <div>
-          <label className="mb-1 block text-sm font-medium">Feature / Topic</label>
-          <input className="input" value={feature} onChange={(e) => setFeature(e.target.value)} required />
+          <div className="mb-1 flex items-center justify-between">
+            <label className="block text-sm font-medium">Topic</label>
+            <button
+              type="button"
+              onClick={() => setCustomTopic((prev) => !prev)}
+              className="text-[11px] font-medium text-brand-600 hover:underline dark:text-brand-400"
+            >
+              {customTopic ? "Choose from list" : "+ Custom topic"}
+            </button>
+          </div>
+          {customTopic ? (
+            <input
+              className="input text-sm"
+              placeholder="Enter custom workflow topic..."
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              required
+            />
+          ) : (
+            <select
+              className="input text-sm"
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              required
+            >
+              <option value="">Select Topic...</option>
+              {availableTopics.map((t) => (
+                <option key={t.name} value={t.name}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
+
         <div>
           <label className="mb-1 block text-sm font-medium">Difficulty</label>
           <select className="input" value={difficulty} onChange={(e) => setDifficulty(e.target.value as Difficulty)}>
@@ -112,21 +225,32 @@ export function QuestionForm({
 
       <div>
         <label className="mb-1 block text-sm font-medium">Tags (comma separated)</label>
-        <input className="input" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="scenario-based, verified" />
+        <input className="input" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="scenario-based, verified, D2110, billing" />
       </div>
 
       <div>
         <div className="mb-1 flex items-center justify-between">
           <label className="block text-sm font-medium">Question Text</label>
-          <button
-            type="button"
-            onClick={() => setIsFormattingOpen(true)}
-            className="flex items-center gap-1 rounded bg-brand-50 px-2 py-0.5 text-xs font-semibold text-brand-700 hover:bg-brand-100 dark:bg-brand-950/40 dark:text-brand-300 dark:hover:bg-brand-900/60"
-            title="Open Word-like formatting editor"
-          >
-            <Edit3 className="h-3 w-3" />
-            <span>Format in Word Editor</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleSuggestTopic}
+              className="flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-900/60"
+              title="Automatically detect topic and tags based on question keywords"
+            >
+              <Sparkles className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+              <span>Suggest Topic</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsFormattingOpen(true)}
+              className="flex items-center gap-1 rounded bg-brand-50 px-2 py-0.5 text-xs font-semibold text-brand-700 hover:bg-brand-100 dark:bg-brand-950/40 dark:text-brand-300 dark:hover:bg-brand-900/60"
+              title="Open Word-like formatting editor"
+            >
+              <Edit3 className="h-3 w-3" />
+              <span>Format in Word Editor</span>
+            </button>
+          </div>
         </div>
         <textarea
           className="input min-h-[100px] font-mono text-xs leading-relaxed"

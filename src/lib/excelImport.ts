@@ -38,10 +38,18 @@ export function createQuestionFingerprint(questionText: string, expectedAnswer =
   return `${normModule}::${normText}::${normAnswer.slice(0, 100)}`;
 }
 
+import {
+  normalizeLegacyModule,
+  classifyQuestionTaxonomy,
+  ControlledModule,
+} from "@/config/taxonomy";
+
 export interface ParsedRow {
   questionNo: string;
   module: string;
+  topic: string;
   feature: string;
+  sourceSheet?: string;
   difficulty: Difficulty;
   questionText: string;
   expectedAnswer: string;
@@ -151,13 +159,30 @@ export function parseQuestionWorkbook(fileBuffer: ArrayBuffer): ParseResult {
       if (verified === "yes") tags.push("verified");
 
       const rawId = String(r["Question No."] ?? "").trim();
-      const dedupeNumberKey = `${sheetName.trim()}::${rawId}`;
-      const fingerprint = createQuestionFingerprint(questionText, expectedAnswer, sheetName.trim());
+      const rawSheet = sheetName.trim();
+      const normalizedModule = normalizeLegacyModule(rawSheet);
+      const rawTopic = String(r["Topic"] ?? "").trim();
+
+      // Determine clean business topic (eliminating "0909 - RCM" or blank topics)
+      let cleanTopic = rawTopic;
+      if (!cleanTopic || cleanTopic.toLowerCase().includes("0909") || cleanTopic.toLowerCase() === rawSheet.toLowerCase()) {
+        const classified = classifyQuestionTaxonomy(questionText, expectedAnswer, normalizedModule, rawTopic);
+        cleanTopic = classified.suggestedTopic;
+        // Also incorporate any tags suggested by classifier
+        for (const st of classified.suggestedTags) {
+          if (!tags.includes(st)) tags.push(st);
+        }
+      }
+
+      const dedupeNumberKey = `${rawSheet}::${rawId}`;
+      const fingerprint = createQuestionFingerprint(questionText, expectedAnswer, normalizedModule);
 
       const row: ParsedRow = {
         questionNo: rawId || "(blank)",
-        module: sheetName.trim(),
-        feature: String(r["Topic"] ?? sheetName).trim(),
+        module: normalizedModule,
+        topic: cleanTopic,
+        feature: cleanTopic, // Sync feature for backwards compatibility
+        sourceSheet: rawSheet !== normalizedModule ? rawSheet : undefined,
         difficulty: normalizeDifficulty(r["Difficulty"]),
         questionText,
         expectedAnswer,
@@ -194,6 +219,7 @@ export function rowsToQuestionInput(
 ): Omit<Question, "id" | "createdAt" | "updatedAt" | "version" | "stats" | "createdBy">[] {
   return rows.map((r) => ({
     module: r.module,
+    topic: r.topic,
     feature: r.feature,
     difficulty: r.difficulty,
     tags: r.tags,
@@ -201,7 +227,8 @@ export function rowsToQuestionInput(
     questionText: r.questionText,
     expectedAnswer: r.expectedAnswer,
     notes: r.notes,
-    sourceId: r.questionNo !== "(blank)" ? `${r.module}::${r.questionNo}` : undefined,
+    sourceId: r.questionNo !== "(blank)" ? `${r.sourceSheet || r.module}::${r.questionNo}` : undefined,
+    legacyClassification: r.sourceSheet ? { module: r.sourceSheet, feature: r.sourceSheet } : undefined,
     fingerprint: r.fingerprint,
   }));
 }
