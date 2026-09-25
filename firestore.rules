@@ -3,17 +3,47 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // This rule allows anyone with your Firestore database reference to view, edit,
-    // and delete all data in your Firestore database. It is useful for getting
-    // started, but it is configured to expire after 30 days because it
-    // leaves your app open to attackers. At that time, all client
-    // requests to your Firestore database will be denied.
-    //
-    // Make sure to write security rules for your app before that time, or else
-    // all client requests to your Firestore database will be denied until you Update
-    // your rules
-    match /{document=**} {
-      allow read, write: if request.time < timestamp.date(2026, 8, 16);
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAuditor() {
+      return isSignedIn() && getUserData().role == 'auditor';
+    }
+
+    // AI Reviews: STRICTLY AUDITOR-ONLY.
+    // Agents NEVER have access to read or write AI reviews or expected answer suggestions.
+    match /ai_reviews/{attemptId} {
+      allow read, write: if isAuditor();
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (request.auth.uid == userId || isAuditor());
+    }
+
+    // Questions collection: Read by signed-in users, editable by auditors
+    match /questions/{questionId} {
+      allow read: if isSignedIn();
+      allow write: if isAuditor();
+    }
+
+    // Exams collection: Read by signed-in users, created/edited by auditors
+    match /exams/{examId} {
+      allow read: if isSignedIn();
+      allow write: if isAuditor();
+    }
+
+    // Attempts collection: Read/written during active and reviewed attempts
+    match /attempts/{attemptId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn();
+      allow delete: if isAuditor();
     }
   }
 }

@@ -191,3 +191,53 @@ export interface ExamAttempt {
   // more than once for the same attempt.
   analyticsFinalized?: boolean;
 }
+
+/* =========================================================
+   AI-ASSISTED REVIEW TYPES
+   ========================================================= */
+
+export type ScoringSource =
+  | "ai_suggested"
+  | "auditor_modified"
+  | "manual"
+  | "finalized";
+
+export interface AiQuestionEvaluation {
+  questionId: string;
+  suggestedMarks: number;
+  maxMarks: number;
+  keyPointsCovered: string[];
+  missingKeyPoints: string[];
+  errors: string[];
+  reasoning: string;
+  confidence: "high" | "medium" | "low";
+  suggestedComment?: string;
+  suggestedKnowledgeGap?: KnowledgeGapCategory;
+  isDeterministic?: boolean;
+}
+
+export interface AttemptAiReview {
+  id: string; // matches attemptId
+  attemptId: string;
+  examId: string;
+  agentId: string;
+  initiatedBy: string; // auditor uid
+  initiatedByName?: string;
+  createdAt: number;
+  completedAt: number;
+  status: "completed" | "partial" | "failed";
+  evaluations: Record<string, AiQuestionEvaluation>;
+  totalSuggestedMarks: number;
+  maxTotalMarks: number;
+  totalQuestions: number;
+  answersReviewedCount: number;
+  auditorOverrides?: string[]; // questionIds modified or accepted by auditor
+  errorMessage?: string;
+}
+
+export interface AiReviewProgress {
+  current: number;
+  total: number;
+  stage: "starting" | "evaluating" | "saving" | "completed" | "failed";
+  message?: string;
+}

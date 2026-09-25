@@ -532,6 +532,71 @@ export async function saveReviewDraft(
 }
 
 /* =========================================================
+   SAVE ALL REVIEW DRAFTS
+   ========================================================= */
+
+/**
+ * Bulk saves draft scoring for multiple answers in an attempt.
+ */
+export async function saveAllReviewDrafts(
+  attempt: ExamAttempt,
+  updates: Array<{
+    questionId: string;
+    marks: number;
+    comments?: string;
+    knowledgeGapCategory?: KnowledgeGapCategory;
+    changeReason?: string;
+  }>,
+  scoredBy: string
+) {
+  const updateMap = new Map(updates.map((u) => [u.questionId, u]));
+
+  const answers = attempt.answers.map((answer) => {
+    const update = updateMap.get(answer.questionId);
+    if (!update) return answer;
+
+    const marks = Math.max(0, Math.min(answer.maxMarks, update.marks));
+    const isChange = answer.marks !== undefined && answer.marks !== marks;
+    const history = answer.scoreHistory ?? [];
+
+    const updatedAnswer: AttemptAnswer = {
+      ...answer,
+      marks,
+      comments: update.comments !== undefined ? update.comments : (answer.comments ?? ""),
+      scoreHistory: isChange
+        ? [
+            ...history,
+            {
+              marks,
+              changedBy: scoredBy,
+              reason: update.changeReason?.trim() || "Score updated during review draft",
+              timestamp: Date.now(),
+            },
+          ]
+        : history,
+    };
+
+    if (marks < answer.maxMarks && update.knowledgeGapCategory) {
+      updatedAnswer.knowledgeGapCategory = update.knowledgeGapCategory;
+    } else {
+      delete updatedAnswer.knowledgeGapCategory;
+    }
+
+    return updatedAnswer;
+  });
+
+  const updateData = {
+    answers,
+    status: "review_in_progress" as const,
+    reviewedBy: scoredBy,
+    reviewStartedAt: attempt.reviewStartedAt ?? Date.now(),
+  };
+
+  await updateDoc(doc(db, COL, attempt.id), updateData);
+  return answers;
+}
+
+/* =========================================================
    FINALIZE REVIEW
    ========================================================= */
 
