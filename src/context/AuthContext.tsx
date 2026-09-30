@@ -58,12 +58,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return (
       <AuthContext.Provider value={{ firebaseUser, profile: null, loading: false }}>
         <div className="flex min-h-screen items-center justify-center p-6 text-center">
-          <div className="max-w-md rounded-lg border border-red-200 bg-red-50 p-5 text-red-800">
-            <h1 className="font-semibold">Couldn&apos;t load your account</h1>
+          <div className="max-w-md rounded-lg border border-red-200 bg-red-50 p-5 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300">
+            <h1 className="font-semibold text-base">Couldn&apos;t load your account</h1>
             <p className="mt-2 text-sm">{authError}</p>
-            <button className="btn-secondary mt-4" onClick={() => window.location.reload()}>
-              Retry
-            </button>
+            <div className="mt-4 flex items-center justify-center gap-2">
+              <button
+                className="btn-primary text-xs"
+                onClick={() => {
+                  if (typeof window !== "undefined" && window.indexedDB && typeof window.indexedDB.databases === "function") {
+                    try {
+                      window.indexedDB.databases().then((dbs) => {
+                        dbs.forEach((dbInfo) => {
+                          if (dbInfo.name) {
+                            try {
+                              window.indexedDB.deleteDatabase(dbInfo.name);
+                            } catch {}
+                          }
+                        });
+                      }).catch(() => {});
+                    } catch {}
+                  }
+                  window.location.reload();
+                }}
+              >
+                Clear Cache & Retry
+              </button>
+              <button
+                className="btn-secondary text-xs"
+                onClick={async () => {
+                  try {
+                    await auth.signOut();
+                    window.location.href = "/login";
+                  } catch {
+                    window.location.reload();
+                  }
+                }}
+              >
+                Sign Out
+              </button>
+            </div>
           </div>
         </div>
       </AuthContext.Provider>

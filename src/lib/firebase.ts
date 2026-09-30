@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from "firebase/firestore";
+import { getFirestore, initializeFirestore, memoryLocalCache } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
@@ -14,17 +14,32 @@ const firebaseConfig = {
 
 export const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-// Use IndexedDB persistence when available.  The guards matter for SSR and
-// browsers where another tab has already claimed the persistence lease.
+
+// Use in-memory local cache to eliminate IndexedDbTransactionError ('Allocate target' failed AbortError).
+// This guarantees zero local storage lockups, zero corruption across multiple browser tabs,
+// and ensures fresh live state across all sessions.
 export const db = (() => {
   try {
     return initializeFirestore(app, {
-      localCache: persistentLocalCache({
-        tabManager: persistentMultipleTabManager(),
-      }),
+      localCache: memoryLocalCache(),
     });
   } catch {
     return getFirestore(app);
   }
 })();
+
+// Clean up any stale IndexedDB databases left behind by legacy persistentMultipleTabManager
+if (typeof window !== "undefined" && window.indexedDB && typeof window.indexedDB.databases === "function") {
+  try {
+    window.indexedDB.databases().then((dbs) => {
+      dbs.forEach((dbInfo) => {
+        if (dbInfo.name && dbInfo.name.startsWith("firestore/")) {
+          try {
+            window.indexedDB.deleteDatabase(dbInfo.name);
+          } catch {}
+        }
+      });
+    }).catch(() => {});
+  } catch {}
+}
 export const storage = getStorage(app);
