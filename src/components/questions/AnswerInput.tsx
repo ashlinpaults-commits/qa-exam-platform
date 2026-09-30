@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useMemo } from "react";
 import type { Question } from "@/types";
 import { QuestionContent } from "./QuestionContent";
 
@@ -90,33 +91,8 @@ export function AnswerInput({
           />
         </div>
       );
-    case "drag_drop_order": {
-      const items: string[] = value ? JSON.parse(value) : question.orderItems ?? [];
-      function move(i: number, dir: -1 | 1) {
-        const copy = [...items];
-        const j = i + dir;
-        if (j < 0 || j >= copy.length) return;
-        [copy[i], copy[j]] = [copy[j], copy[i]];
-        onChange(JSON.stringify(copy));
-      }
-      return (
-        <div className="space-y-2">
-          <p className="text-xs text-slate-500">Use the arrows to arrange in the correct order.</p>
-          {items.map((item, i) => (
-            <div
-              key={item + i}
-              className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-800"
-            >
-              <span>{i + 1}. {item}</span>
-              <div className="flex gap-1">
-                <button type="button" className="btn-secondary px-2 py-1" onClick={() => move(i, -1)}>↑</button>
-                <button type="button" className="btn-secondary px-2 py-1" onClick={() => move(i, 1)}>↓</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      );
-    }
+    case "drag_drop_order":
+      return <DragDropAnswerInput question={question} value={value} onChange={onChange} />;
     case "descriptive":
     default:
       return (
@@ -129,3 +105,77 @@ export function AnswerInput({
       );
   }
 }
+
+function DragDropAnswerInput({
+  question,
+  value,
+  onChange,
+}: {
+  question: Question;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const initialList = useMemo(
+    () => question.shuffledOrderItems ?? question.orderItems ?? [],
+    [question.shuffledOrderItems, question.orderItems]
+  );
+
+  const items: string[] = useMemo(() => {
+    if (!value) return initialList;
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch {
+      // ignore JSON parse error and use initial
+    }
+    return initialList;
+  }, [value, initialList]);
+
+  // Ensure initial order is captured if value is not set yet
+  useEffect(() => {
+    if (!value && initialList.length > 0) {
+      onChange(JSON.stringify(initialList));
+    }
+  }, [value, initialList, onChange]);
+
+  function move(i: number, dir: -1 | 1) {
+    const copy = [...items];
+    const j = i + dir;
+    if (j < 0 || j >= copy.length) return;
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+    onChange(JSON.stringify(copy));
+  }
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-slate-500">Use the arrows to arrange in the correct order.</p>
+      {items.map((item, i) => (
+        <div
+          key={item + i}
+          className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-800"
+        >
+          <span>{i + 1}. {item}</span>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              className="btn-secondary px-2 py-1"
+              disabled={i === 0}
+              onClick={() => move(i, -1)}
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              className="btn-secondary px-2 py-1"
+              disabled={i === items.length - 1}
+              onClick={() => move(i, 1)}
+            >
+              ↓
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+

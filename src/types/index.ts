@@ -54,6 +54,7 @@ export interface Question {
   imageUrl?: string;
   caseStudyContext?: string;
   orderItems?: string[];
+  shuffledOrderItems?: string[];
 
   version: number;
   createdBy: string;
@@ -61,7 +62,7 @@ export interface Question {
   updatedAt: number;
 
   // Rolling analytics, denormalized for fast reads
-  stats: {
+  stats?: {
     timesAsked: number;
     avgMarks: number;
     correctPct: number;
@@ -269,6 +270,9 @@ export interface ScoreHistoryEntry {
   changedBy: string;
   reason: string;
   timestamp: number;
+  previousMarks?: number;
+  previousScore?: number;
+  aiSuggestedScore?: number;
 }
 
 export interface AttemptAnswer {
@@ -277,6 +281,12 @@ export interface AttemptAnswer {
 
   // Filled by auditor
   marks?: number;
+
+  // Preserved original finalized score before amendments
+  originalFinalScore?: number;
+
+  // AI suggested score preserved separately from auditor score
+  aiSuggestedScore?: number;
 
   maxMarks: number;
   comments?: string;
@@ -297,6 +307,75 @@ export interface AttemptAnswer {
 }
 
 /* =========================================================
+   AI REVIEW TYPES
+   ========================================================= */
+
+export type AiConfidence = "high" | "medium" | "low";
+export type AiReviewStatus = "pending" | "processing" | "complete" | "failed";
+
+export type AiVerdict =
+  | "fully_correct"
+  | "mostly_correct"
+  | "partially_correct"
+  | "mostly_incorrect"
+  | "incorrect"
+  | "no_answer";
+
+export interface QuestionAiReview {
+  questionId: string;
+  understandingScore?: number; // 0 to 10 understanding scale
+  aiSuggestedScore: number; // Converted to question maxMarks
+  maxScore: number;
+  confidence: AiConfidence;
+  verdict?: AiVerdict;
+  reasoning: string;
+  matchedConcepts?: string[];
+  missingConcepts?: string[];
+  contradictions?: string[];
+  missingPoints?: string[];
+  detectedIssues?: string[];
+  reviewedAt: number;
+}
+
+export interface AttemptAiReview {
+  status: AiReviewStatus;
+  reviewedAt?: number;
+  overallSuggestedScore?: number;
+  maxPossibleScore?: number;
+  overallSuggestedPercentage?: number;
+  questionReviews: QuestionAiReview[];
+  errorMessage?: string;
+  error?: string;
+}
+
+/* =========================================================
+   EXAM ASSIGNMENTS
+   ========================================================= */
+
+export type AssignmentType = "original" | "reassigned";
+export type ReassignmentMode = "all" | "wrong_only" | "custom";
+export type AssignmentStatus = "assigned" | "in_progress" | "submitted" | "reviewed";
+
+export interface ExamAssignment {
+  id: string;
+  examId: string;
+  agentId: string;
+  sourceAttemptId?: string;
+  assignmentType: AssignmentType;
+  reassignmentMode?: ReassignmentMode;
+  questionIds: string[];
+  status: AssignmentStatus;
+  assignedAt: number;
+  assignedBy?: string;
+  dueAt?: number;
+  attemptId?: string;
+  examName?: string;
+  module?: string;
+  batch?: string;
+  questionCount?: number;
+}
+
+/* =========================================================
    EXAM ATTEMPTS
    ========================================================= */
 
@@ -311,6 +390,9 @@ export interface ExamAttempt {
   examId: string;
   agentId: string;
   attemptNumber: number;
+
+  // Optional link to specific assignment
+  assignmentId?: string;
 
   // Reattempt identification
   isReattempt?: boolean;
@@ -338,12 +420,24 @@ export interface ExamAttempt {
 
   totalMarks?: number;
   maxTotalMarks?: number;
+  originalTotalMarks?: number;
+  amendedAt?: number;
+  amendedBy?: string;
+  amendmentReason?: string;
 
   /* -------------------------
      Attempt state
      ------------------------- */
 
   status: AttemptStatus;
+
+  /* -------------------------
+     AI Review
+     ------------------------- */
+
+  aiReview?: AttemptAiReview;
+  hasAiReview?: boolean;
+  aiReviewStatus?: AiReviewStatus;
 
   /* -------------------------
      Auditor review lifecycle

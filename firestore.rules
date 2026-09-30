@@ -54,7 +54,7 @@ service cloud.firestore {
       allow create: if isAuditor()
         && request.resource.data.createdBy == request.auth.uid;
       allow update: if isAuditor()
-        && request.resource.data.createdBy == resource.data.createdBy;
+        && (!('createdBy' in resource.data) || request.resource.data.createdBy == resource.data.createdBy);
       allow delete: if isAuditor();
     }
 
@@ -72,7 +72,7 @@ service cloud.firestore {
         && request.resource.data.status == "in_progress"
         && request.resource.data.answers is list
         && !request.resource.data.keys().hasAny([
-          "marks", "totalMarks", "reviewedBy", "reviewedAt", "scoreHistory"
+          "marks", "totalMarks", "reviewedBy", "reviewedAt", "scoreHistory", "aiReview"
         ]);
 
       // Agent drafts are stored in a separate map. This avoids allowing an
@@ -104,9 +104,41 @@ service cloud.firestore {
         && request.resource.data.startedAt == resource.data.startedAt
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "answers", "status", "reviewStartedAt", "reviewedBy",
-          "reviewedAt", "totalMarks", "maxTotalMarks", "analyticsFinalized"
+          "reviewedAt", "totalMarks", "maxTotalMarks", "analyticsFinalized",
+          "aiReview", "hasAiReview", "aiReviewStatus", "assignmentId",
+          "originalTotalMarks", "amendedAt", "amendedBy", "amendmentReason"
         ]);
       allow delete: if false;
+    }
+
+    // Assignments collection:
+    // Tracks specific issuances of an exam to agents (both original and reassigned).
+    // Auditors have full management authority. Agents can read their own assignments
+    // and transition status (e.g. to in_progress / submitted) when taking an exam.
+    match /assignments/{assignmentId} {
+      allow get: if resource == null
+        || (signedIn() && resource.data.agentId == request.auth.uid)
+        || isAuditor();
+      allow list: if (signedIn() && resource.data.agentId == request.auth.uid)
+        || isAuditor();
+      allow create: if isAuditor();
+      allow update: if isAuditor()
+        || (signedIn()
+          && resource.data.agentId == request.auth.uid
+          && request.resource.data.agentId == request.auth.uid
+          && request.resource.data.examId == resource.data.examId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            "status", "attemptId"
+          ]));
+      allow delete: if isAuditor();
+    }
+
+    // AI Reviews collection:
+    // Contains confidential AI grading rubrics, reasoning, and suggested marks.
+    // Strictly confidential: readable and writable ONLY by auditors.
+    // Agents are completely denied read and write access.
+    match /aiReviews/{attemptId} {
+      allow read, write: if isAuditor();
     }
 
     // Any future collection is deny-by-default until it has an explicit

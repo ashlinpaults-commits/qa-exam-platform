@@ -18,9 +18,9 @@ export function exportQuestionsToExcel(questions: Question[], filename = "questi
       "Expected Answer": q.expectedAnswer,
       Tags: q.tags.join(", "),
       Notes: q.notes ?? "",
-      "Times Asked": q.stats.timesAsked,
-      "Avg Marks": q.stats.avgMarks,
-      "Correct %": q.stats.correctPct,
+      "Times Asked": q.stats?.timesAsked ?? 0,
+      "Avg Marks": q.stats?.avgMarks ?? 0,
+      "Correct %": q.stats?.correctPct ?? 0,
     };
   });
   const ws = XLSX.utils.json_to_sheet(rows);

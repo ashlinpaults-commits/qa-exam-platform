@@ -4,6 +4,7 @@ import { useEffect, useState, useMemo } from "react";
 import { fetchUsersByRole } from "@/lib/users";
 import { updateExam } from "@/lib/exams";
 import { fetchAttemptsForExam } from "@/lib/attempts";
+import { createAssignment } from "@/lib/assignments";
 import { getQuestionsByIds, createRedactedQuestionSnapshot } from "@/lib/questions";
 import type { Exam, AppUser, ExamStatus, ExamAttempt, Question } from "@/types";
 import {
@@ -328,8 +329,28 @@ export function AssignAgentsModal({ exam, onDone, onClose }: AssignAgentsModalPr
         reattemptPermissions,
       });
 
+      // Persist actionable Assignment record for the agent
+      const modeKey =
+        reassignMode === "same_questions"
+          ? ("all" as const)
+          : reassignMode === "wrong_answers"
+          ? ("wrong_only" as const)
+          : ("custom" as const);
+
+      const latestRev = activeReassignAgent.latestReviewedAttempt;
+
+      await createAssignment({
+        exam,
+        agentId: activeReassignAgent.agent.uid,
+        sourceAttemptId: latestRev?.id,
+        assignmentType: "reassigned",
+        reassignmentMode: modeKey,
+        questionIds: questionIds || [],
+        assignedBy: exam.createdBy || "auditor",
+      });
+
       setReassignSuccessMsg(
-        `Reassignment confirmed for ${activeReassignAgent.agent.name}. Next attempt will be serviced as a reattempt.`
+        `Reassignment confirmed for ${activeReassignAgent.agent.name}. An actionable assignment has been created.`
       );
 
       setTimeout(() => {
@@ -337,7 +358,7 @@ export function AssignAgentsModal({ exam, onDone, onClose }: AssignAgentsModalPr
           assignedAgentIds: updatedAssignedIds,
           status: targetStatus,
         });
-      }, 1800);
+      }, 1500);
     } catch (err) {
       console.error("Failed to confirm reassignment:", err);
       setError(err instanceof Error ? err.message : "Failed to confirm reassignment. Please retry.");

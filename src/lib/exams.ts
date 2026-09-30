@@ -205,12 +205,37 @@ export async function getExam(id: string): Promise<Exam | null> {
   return snap.exists() ? normalizeExamDoc(snap.id, snap.data() as Partial<Exam>) : null;
 }
 
+/**
+ * Checks whether an exam name already exists in the system (case-insensitive).
+ * Optionally excludes a specific examId when editing an existing exam.
+ */
+export async function isExamNameTaken(name: string, excludeExamId?: string): Promise<boolean> {
+  const trimmed = name.trim().toLowerCase();
+  if (!trimmed) return false;
+  const snap = await getDocs(collection(db, COL));
+  return snap.docs.some((d) => {
+    if (excludeExamId && d.id === excludeExamId) return false;
+    const existingName = (d.data()?.name || "").trim().toLowerCase();
+    return existingName === trimmed;
+  });
+}
+
 export async function createExam(
   data: Omit<Exam, "id" | "createdAt" | "updatedAt" | "createdBy">,
   createdBy: string
 ) {
+  const trimmedName = data.name.trim();
+  if (!trimmedName) {
+    throw new Error("Exam name cannot be empty.");
+  }
+  const taken = await isExamNameTaken(trimmedName);
+  if (taken) {
+    throw new Error(`An exam with the name "${trimmedName}" already exists. Please choose a unique name.`);
+  }
+
   const payload = stripUndefined({
     ...data,
+    name: trimmedName,
     createdBy,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -220,6 +245,17 @@ export async function createExam(
 }
 
 export async function updateExam(id: string, data: Partial<Exam>) {
+  if (data.name !== undefined) {
+    const trimmedName = data.name.trim();
+    if (!trimmedName) {
+      throw new Error("Exam name cannot be empty.");
+    }
+    const taken = await isExamNameTaken(trimmedName, id);
+    if (taken) {
+      throw new Error(`An exam with the name "${trimmedName}" already exists. Please choose a unique name.`);
+    }
+    data.name = trimmedName;
+  }
   const payload = stripUndefined({ ...data, updatedAt: Date.now() });
   await updateDoc(doc(db, COL, id), payload);
 }
@@ -232,9 +268,17 @@ export async function duplicateExam(examId: string, createdBy: string): Promise<
   const original = await getExam(examId);
   if (!original) throw new Error("Exam not found");
   const { id: _drop, ...rest } = original;
+
+  let copyName = `${original.name} (Copy)`;
+  let counter = 1;
+  while (await isExamNameTaken(copyName)) {
+    counter++;
+    copyName = `${original.name} (Copy ${counter})`;
+  }
+
   const payload = stripUndefined({
     ...rest,
-    name: `${original.name} (Copy)`,
+    name: copyName,
     status: "draft" as const,
     assignedAgentIds: [],
     reattemptPermissions: {},

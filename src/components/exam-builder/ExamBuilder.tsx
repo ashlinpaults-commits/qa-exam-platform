@@ -24,6 +24,7 @@ import {
   getNextExamNumber,
   getKnownBatches,
   parseExamNameComponents,
+  isExamNameTaken,
 } from "@/lib/exams";
 import {
   CONTROLLED_MODULES,
@@ -166,14 +167,27 @@ export function ExamBuilder({ examId }: { examId?: string }) {
   }
 
   async function handleSave(publish: boolean) {
-    if (!profile || !name.trim() || selected.length === 0) {
-      if (!name.trim()) setError("Please provide an exam name.");
+    const cleanName = name.trim();
+    if (!profile || !cleanName || selected.length === 0) {
+      if (!cleanName) setError("Please provide an exam name.");
       else if (selected.length === 0) setError("Please select at least one question.");
       return;
     }
 
     setSaving(true);
     setError("");
+
+    // Check for duplicate exam name before proceeding (Phase 4A)
+    try {
+      const nameTaken = await isExamNameTaken(cleanName, examId);
+      if (nameTaken) {
+        setError(`An exam with the name "${cleanName}" already exists. Please choose a unique exam name.`);
+        setSaving(false);
+        return;
+      }
+    } catch (checkErr) {
+      console.warn("Failed to check duplicate exam name:", checkErr);
+    }
 
     // Ensure unique questions in stable contiguous order
     const seenIds = new Set<string>();

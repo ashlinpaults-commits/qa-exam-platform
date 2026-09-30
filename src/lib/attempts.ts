@@ -8,9 +8,10 @@ import {
   where,
   orderBy,
   runTransaction,
+  writeBatch,
 } from "firebase/firestore";
 
-import { db } from "./firebase";
+import { db, auth } from "./firebase";
 
 import type {
   ExamAttempt,
@@ -21,20 +22,62 @@ import type {
   ExamMasterScorecard,
   AttemptProgressionStep,
   QuestionMasteryRecord,
+  AttemptAiReview,
+  QuestionAiReview,
 } from "@/types";
-import { stripUndefined } from "./questions";
+import { stripUndefined, extractRawAnswerText } from "./questions";
+import { getAssignment, updateAssignmentStatus } from "./assignments";
 
 const COL = "attempts";
 
-function normalizeAgentAnswers(attempt: ExamAttempt): ExamAttempt {
+export function normalizeAgentAnswers(attempt: ExamAttempt): ExamAttempt {
   const agentAnswers = attempt.agentAnswers ?? {};
+  const existingAnswers = attempt.answers || [];
+
+  if (existingAnswers.length > 0) {
+    return {
+      ...attempt,
+      answers: existingAnswers.map((existing) => {
+        const qid = existing.questionId || (existing as any).id || existing.questionSnapshot?.id;
+        let draft = qid ? agentAnswers[qid] : undefined;
+        if (draft === undefined && typeof qid === "string") {
+          draft = agentAnswers[qid.trim()];
+        }
+        if (draft === undefined && typeof qid === "string") {
+          const matchingKey = Object.keys(agentAnswers).find(
+            (k) => k.trim().toLowerCase() === qid.trim().toLowerCase()
+          );
+          if (matchingKey) draft = agentAnswers[matchingKey];
+        }
+        const rawVal = draft !== undefined && draft !== null ? draft : existing.agentAnswer || "";
+        const finalAns = extractRawAnswerText(rawVal);
+        return {
+          ...existing,
+          questionId: qid,
+          agentAnswer: finalAns,
+          maxMarks: existing.maxMarks || 10,
+        };
+      }),
+    };
+  }
+
+  // Fallback for legacy attempts with empty answers array
+  const qidSet = new Set<string>();
+  for (const qid of Object.keys(agentAnswers)) {
+    if (qid && qid.trim()) qidSet.add(qid.trim());
+  }
+
   return {
     ...attempt,
-    answers: attempt.answers.map((answer) =>
-      Object.prototype.hasOwnProperty.call(agentAnswers, answer.questionId)
-        ? { ...answer, agentAnswer: agentAnswers[answer.questionId] }
-        : answer
-    ),
+    answers: Array.from(qidSet).map((qid) => {
+      const draft = agentAnswers[qid] ?? agentAnswers[qid.trim()];
+      const finalAns = extractRawAnswerText(draft || "");
+      return {
+        questionId: qid,
+        agentAnswer: finalAns,
+        maxMarks: 10,
+      };
+    }),
   };
 }
 
@@ -116,10 +159,24 @@ export async function getAttempt(
   id: string
 ): Promise<ExamAttempt | null> {
   const snap = await getDoc(doc(db, COL, id));
+  if (!snap.exists()) return null;
 
-  return snap.exists()
-    ? normalizeAgentAnswers({ id: snap.id, ...snap.data() } as ExamAttempt)
-    : null;
+  const attempt = normalizeAgentAnswers({ id: snap.id, ...snap.data() } as ExamAttempt);
+
+  // If aiReview is not already on the attempt document, load from confidential aiReviews collection
+  if (!attempt.aiReview) {
+    try {
+      const aiSnap = await getDoc(doc(db, "aiReviews", id));
+      if (aiSnap.exists()) {
+        const d = aiSnap.data();
+        attempt.aiReview = (d.aiReview || d) as any;
+      }
+    } catch {
+      // Agents lack read access to aiReviews collection; this correctly keeps AI review confidential
+    }
+  }
+
+  return attempt;
 }
 
 /* =========================================================
@@ -142,12 +199,19 @@ export async function getAttempt(
  */
 export async function startAttempt(
   exam: Exam,
-  agentId: string
+  agentId: string,
+  assignmentId?: string
 ): Promise<string> {
   /*
    * First load the agent's existing attempts for this exam.
    */
-  console.debug(`[startAttempt] examId=${exam.id} agentId=${agentId}`);
+  console.debug(`[startAttempt] examId=${exam.id} agentId=${agentId} assignmentId=${assignmentId || "none"}`);
+
+  let activeAssignment = null;
+  if (assignmentId) {
+    activeAssignment = await getAssignment(assignmentId);
+  }
+
   const prior = await fetchAttemptsForAgent(
     agentId,
     exam.id
@@ -158,6 +222,16 @@ export async function startAttempt(
    * RESUME EXISTING ACTIVE ATTEMPT
    * -------------------------------------------------------
    */
+
+  if (activeAssignment?.attemptId) {
+    const matched = prior.find(
+      (a) => a.id === activeAssignment!.attemptId && a.status === "in_progress"
+    );
+    if (matched) {
+      console.debug(`[startAttempt] Resuming assigned attemptId=${matched.id}`);
+      return matched.id;
+    }
+  }
 
   const existingActive = prior
     .filter(
@@ -171,6 +245,9 @@ export async function startAttempt(
 
   if (existingActive) {
     console.debug(`[startAttempt] Resuming active attemptId=${existingActive.id} attemptNumber=${existingActive.attemptNumber}`);
+    if (activeAssignment && !activeAssignment.attemptId) {
+      await updateAssignmentStatus(activeAssignment.id, "in_progress", existingActive.id);
+    }
     return existingActive.id;
   }
 
@@ -205,8 +282,9 @@ export async function startAttempt(
   const latestReviewed = sortedPrior.find((attempt) => attempt.status === "reviewed");
 
   const hasActiveReattemptPermission = Boolean(
-    permission &&
-    (!latestAttempt || permission.grantedAt > latestAttempt.startedAt)
+    activeAssignment ||
+    (permission &&
+      (!latestAttempt || permission.grantedAt > latestAttempt.startedAt))
   );
 
   /*
@@ -290,8 +368,14 @@ export async function startAttempt(
       a.order - b.order
   );
 
-  // If this is an authorized reattempt with specific question scoping:
-  if (
+  // If this is an authorized assignment with specific question scoping:
+  if (activeAssignment?.questionIds && activeAssignment.questionIds.length > 0) {
+    const allowedQIdSet = new Set(activeAssignment.questionIds);
+    const filtered = targetQuestionRefs.filter((q) => allowedQIdSet.has(q.questionId));
+    if (filtered.length > 0) {
+      targetQuestionRefs = filtered;
+    }
+  } else if (
     attemptNumber > 1 &&
     hasActiveReattemptPermission &&
     permission?.questionIds &&
@@ -383,7 +467,25 @@ export async function startAttempt(
         analyticsFinalized: false,
       };
 
-      if (attemptNumber > 1) {
+      if (activeAssignment) {
+        payload.assignmentId = activeAssignment.id;
+        if (activeAssignment.assignmentType === "reassigned" || attemptNumber > 1) {
+          payload.isReattempt = true;
+          if (activeAssignment.sourceAttemptId) {
+            payload.parentAttemptId = activeAssignment.sourceAttemptId;
+          } else if (latestReviewed) {
+            payload.parentAttemptId = latestReviewed.id;
+          }
+          if (activeAssignment.reassignmentMode) {
+            payload.reattemptSource =
+              activeAssignment.reassignmentMode === "wrong_only"
+                ? "wrong_answers"
+                : activeAssignment.reassignmentMode === "custom"
+                ? "manual_selection"
+                : "same_questions";
+          }
+        }
+      } else if (attemptNumber > 1) {
         payload.isReattempt = true;
         if (latestReviewed) {
           payload.parentAttemptId = latestReviewed.id;
@@ -405,6 +507,14 @@ export async function startAttempt(
       console.debug(`[startAttempt] Created attempt payload written for attemptId=${attemptId}`);
     }
   );
+
+  if (activeAssignment) {
+    try {
+      await updateAssignmentStatus(activeAssignment.id, "in_progress", attemptId);
+    } catch (err) {
+      console.warn("[startAttempt] Failed to update assignment status:", err);
+    }
+  }
 
   return attemptId;
 }
@@ -524,8 +634,12 @@ export async function verifyAttemptAnswers(
   for (const [qid, expectedVal] of Object.entries(expectedAnswers)) {
     // Only check non-empty answers
     if (expectedVal && expectedVal.trim().length > 0) {
-      const persistedVal = persisted[qid];
-      if (persistedVal === undefined || persistedVal === null || persistedVal !== expectedVal) {
+      const persistedVal = persisted[qid] ?? persisted[qid.trim()];
+      if (
+        persistedVal === undefined ||
+        persistedVal === null ||
+        (persistedVal !== expectedVal && persistedVal.trim() !== expectedVal.trim())
+      ) {
         missing.push(qid);
       }
     }
@@ -549,7 +663,7 @@ export async function verifyAttemptAnswers(
  */
 export async function submitAttempt(
   attemptId: string,
-  startedAt: number
+  startedAt?: number
 ) {
   console.debug(`[submitAttempt] Submitting attemptId=${attemptId}`);
   const attemptRef = doc(
@@ -607,11 +721,8 @@ export async function submitAttempt(
       }
 
       const now = Date.now();
-
-      const timeTakenSeconds =
-        Math.round(
-          (now - startedAt) / 1000
-        );
+      const actualStartedAt = attempt.startedAt || startedAt || now;
+      const timeTakenSeconds = Math.max(0, Math.round((now - actualStartedAt) / 1000));
 
       transaction.update(
         attemptRef,
@@ -623,6 +734,34 @@ export async function submitAttempt(
       );
     }
   );
+
+  // Post-submission: update linked assignment status and trigger AI review in background
+  try {
+    const snap = await getDoc(attemptRef);
+    if (snap.exists()) {
+      const data = snap.data() as ExamAttempt;
+      if (data.assignmentId) {
+        await updateAssignmentStatus(data.assignmentId, "submitted");
+      }
+      // Asynchronously trigger AI review with authenticated user token
+      try {
+        const idToken = await auth.currentUser?.getIdToken(true);
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (idToken) {
+          headers["Authorization"] = `Bearer ${idToken}`;
+        }
+        fetch("/api/ai/review", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ attemptId, attempt: data }),
+        }).catch((err) => console.warn("[submitAttempt] AI review trigger error:", err));
+      } catch (tokenErr) {
+        console.warn("[submitAttempt] Could not acquire ID token for AI review:", tokenErr);
+      }
+    }
+  } catch (err) {
+    console.warn("[submitAttempt] Post-submission background tasks error:", err);
+  }
 }
 
 /* =========================================================
@@ -971,115 +1110,7 @@ export async function finalizeReview(
      * so concurrent finalizations for the same question no longer lose
      * data.
      */
-    for (
-      const answer
-      of attempt.answers
-    ) {
-      const questionRef = doc(
-        db,
-        "questions",
-        answer.questionId
-      );
-
-      await runTransaction(
-        db,
-        async (transaction) => {
-          const snap =
-            await transaction.get(
-              questionRef
-            );
-
-          if (!snap.exists()) {
-            return;
-          }
-
-          const question =
-            snap.data() as {
-              stats?: {
-                timesAsked?: number;
-                avgMarks?: number;
-                correctPct?: number;
-              };
-            };
-
-          const previousTimesAsked =
-            question.stats
-              ?.timesAsked ?? 0;
-
-          const previousAverage =
-            question.stats
-              ?.avgMarks ?? 0;
-
-          const previousCorrectPct =
-            question.stats
-              ?.correctPct ?? 0;
-
-          const previousCorrectCount =
-            Math.round(
-              (previousCorrectPct /
-                100) *
-                previousTimesAsked
-            );
-
-          const marks =
-            answer.marks ?? 0;
-
-          /*
-           * 70% or higher counts as correct
-           * for aggregate question analytics.
-           */
-          const isCorrect =
-            answer.maxMarks > 0 &&
-            marks /
-              answer.maxMarks >=
-              0.7;
-
-          const newTimesAsked =
-            previousTimesAsked + 1;
-
-          const newCorrectCount =
-            previousCorrectCount +
-            (isCorrect ? 1 : 0);
-
-          const newAverage =
-            (
-              previousAverage *
-                previousTimesAsked +
-              marks
-            ) /
-            newTimesAsked;
-
-          const correctPct =
-            (
-              newCorrectCount /
-              newTimesAsked
-            ) *
-            100;
-
-          transaction.update(
-            questionRef,
-            {
-              stats: {
-                timesAsked:
-                  newTimesAsked,
-
-                avgMarks:
-                  newAverage,
-
-                correctPct,
-
-                incorrectPct:
-                  100 -
-                  correctPct,
-              },
-
-              updatedAt:
-                Date.now(),
-            }
-          );
-        }
-      );
-    }
+    await updateQuestionStatsBatch(attempt.answers);
 
     /*
      * Mark analytics as processed.
@@ -1115,6 +1146,394 @@ export async function finalizeReview(
   }
 
 /* =========================================================
+   SAVE ALL REVIEW DRAFT SCORES (LOW-CLICK BATCH DRAFT)
+   ========================================================= */
+
+export interface BatchReviewScoreInput {
+  marks?: number;
+  comments?: string;
+  knowledgeGapCategory?: KnowledgeGapCategory;
+}
+
+/**
+ * Saves all auditor draft scores and notes in a single atomic transaction.
+ * Does not require individual question submissions.
+ */
+export async function saveAllReviewDraftScores(
+  attemptId: string,
+  reviewerId: string,
+  scoresMap: Record<string, BatchReviewScoreInput>
+): Promise<ExamAttempt> {
+  const attemptRef = doc(db, COL, attemptId);
+
+  return runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(attemptRef);
+    if (!snap.exists()) {
+      throw new Error("Attempt not found.");
+    }
+    const fresh = normalizeAgentAnswers({
+      id: snap.id,
+      ...snap.data(),
+    } as ExamAttempt);
+
+    if (fresh.status === "reviewed") {
+      throw new Error("This review has already been finalized and can no longer be edited here.");
+    }
+
+    const answers = fresh.answers.map((answer) => {
+      const input = scoresMap[answer.questionId];
+      if (!input || input.marks === undefined) return stripUndefined(answer);
+
+      const marks = input.marks;
+      if (marks < 0 || marks > answer.maxMarks) {
+        throw new Error(`Marks for question must be between 0 and ${answer.maxMarks}.`);
+      }
+
+      const isChange = answer.marks !== undefined && answer.marks !== marks;
+      const history = answer.scoreHistory ?? [];
+
+      const updated: AttemptAnswer = {
+        ...answer,
+        marks,
+        comments: input.comments ?? answer.comments ?? "",
+        scoreHistory: isChange
+          ? [
+              ...history,
+              {
+                marks,
+                changedBy: reviewerId,
+                reason: "Score updated during draft review",
+                timestamp: Date.now(),
+              },
+            ]
+          : history,
+      };
+
+      if (marks < answer.maxMarks && input.knowledgeGapCategory) {
+        updated.knowledgeGapCategory = input.knowledgeGapCategory;
+      } else {
+        delete updated.knowledgeGapCategory;
+      }
+
+      const clean = stripUndefined(updated);
+      if (clean.questionSnapshot) {
+        clean.questionSnapshot = stripUndefined(clean.questionSnapshot);
+      }
+      return clean;
+    });
+
+    const updateData = stripUndefined({
+      answers,
+      status: "review_in_progress" as const,
+      reviewedBy: reviewerId,
+      reviewStartedAt: fresh.reviewStartedAt ?? Date.now(),
+    });
+
+    transaction.update(attemptRef, updateData);
+    return { ...fresh, ...updateData };
+  });
+}
+
+/* =========================================================
+   FINALIZE ATTEMPT REVIEW (ONE-ACTION COMPLETE REVIEW)
+   ========================================================= */
+
+export interface FinalizeReviewInput {
+  attemptId: string;
+  reviewerId: string;
+  auditorScores: Record<string, number>;
+  auditorComments?: Record<string, string>;
+  knowledgeGaps?: Record<string, KnowledgeGapCategory>;
+}
+
+/**
+ * Authoritative single final submission for an attempt review.
+ * 1. Validates all scores in state.
+ * 2. Saves all scores and feedback in one atomic transaction.
+ * 3. Separates and preserves AI suggested score vs Auditor final score.
+ * 4. Calculates final total and max marks.
+ * 5. Updates attempt status to 'reviewed'.
+ * 6. Updates linked assignment status to 'reviewed'.
+ * 7. Updates question bank analytics.
+ */
+/**
+ * High-performance batched update for Question Bank analytics.
+ * Replaces N sequential Firestore transactions with parallel reads and a single atomic WriteBatch.
+ */
+export async function updateQuestionStatsBatch(answers: AttemptAnswer[]): Promise<void> {
+  if (!answers || answers.length === 0) return;
+  try {
+    const questionSnaps = await Promise.all(
+      answers.map((a) => getDoc(doc(db, "questions", a.questionId)))
+    );
+
+    const batch = writeBatch(db);
+    let batchCount = 0;
+
+    answers.forEach((answer, idx) => {
+      const snap = questionSnaps[idx];
+      if (!snap || !snap.exists()) return;
+      const questionRef = snap.ref;
+      const question = snap.data() as {
+        stats?: {
+          timesAsked?: number;
+          avgMarks?: number;
+          correctPct?: number;
+        };
+      };
+
+      const previousTimesAsked = question.stats?.timesAsked ?? 0;
+      const previousAverage = question.stats?.avgMarks ?? 0;
+      const previousCorrectPct = question.stats?.correctPct ?? 0;
+      const previousCorrectCount = Math.round((previousCorrectPct / 100) * previousTimesAsked);
+      const marks = answer.marks ?? 0;
+      const isCorrect = answer.maxMarks > 0 && marks / answer.maxMarks >= 0.7;
+      const newTimesAsked = previousTimesAsked + 1;
+      const newCorrectCount = previousCorrectCount + (isCorrect ? 1 : 0);
+      const newAverage = (previousAverage * previousTimesAsked + marks) / newTimesAsked;
+      const correctPct = (newCorrectCount / newTimesAsked) * 100;
+
+      batch.update(questionRef, {
+        stats: {
+          timesAsked: newTimesAsked,
+          avgMarks: newAverage,
+          correctPct,
+          incorrectPct: 100 - correctPct,
+        },
+        updatedAt: Date.now(),
+      });
+      batchCount++;
+    });
+
+    if (batchCount > 0) {
+      await batch.commit();
+    }
+  } catch (err) {
+    console.warn("[updateQuestionStatsBatch] Batch update encountered issue:", err);
+  }
+}
+
+/**
+ * Updates question analytics on scorecard amendment without double-counting timesAsked.
+ * Adjusts avgMarks and correctPct based on the delta between previous and amended scores.
+ */
+export async function updateQuestionStatsOnAmendmentBatch(
+  previousAnswers: AttemptAnswer[],
+  amendedAnswers: AttemptAnswer[]
+): Promise<void> {
+  if (!amendedAnswers || amendedAnswers.length === 0) return;
+  const prevMap = new Map(previousAnswers.map((a) => [a.questionId, a]));
+
+  const changedAnswers = amendedAnswers.filter((curr) => {
+    const prev = prevMap.get(curr.questionId);
+    return prev && prev.marks !== undefined && curr.marks !== undefined && prev.marks !== curr.marks;
+  });
+
+  if (changedAnswers.length === 0) return;
+
+  try {
+    const questionSnaps = await Promise.all(
+      changedAnswers.map((a) => getDoc(doc(db, "questions", a.questionId)))
+    );
+
+    const batch = writeBatch(db);
+    let batchCount = 0;
+
+    changedAnswers.forEach((answer, idx) => {
+      const snap = questionSnaps[idx];
+      if (!snap || !snap.exists()) return;
+      const questionRef = snap.ref;
+      const prevAnswer = prevMap.get(answer.questionId);
+      if (!prevAnswer) return;
+
+      const question = snap.data() as {
+        stats?: {
+          timesAsked?: number;
+          avgMarks?: number;
+          correctPct?: number;
+        };
+      };
+
+      const timesAsked = question.stats?.timesAsked ?? 1;
+      const currentAvg = question.stats?.avgMarks ?? (answer.marks ?? 0);
+      const currentCorrectPct = question.stats?.correctPct ?? 0;
+      const currentCorrectCount = Math.round((currentCorrectPct / 100) * timesAsked);
+
+      const oldMark = prevAnswer.marks ?? 0;
+      const newMark = answer.marks ?? 0;
+
+      // Adjust average without double-counting timesAsked
+      const oldTotalSum = currentAvg * timesAsked;
+      const newTotalSum = oldTotalSum - oldMark + newMark;
+      const newAverage = timesAsked > 0 ? newTotalSum / timesAsked : newMark;
+
+      // Adjust correct count (70% pass threshold)
+      const wasCorrect = prevAnswer.maxMarks > 0 && oldMark / prevAnswer.maxMarks >= 0.7;
+      const isCorrect = answer.maxMarks > 0 && newMark / answer.maxMarks >= 0.7;
+      let newCorrectCount = currentCorrectCount;
+      if (wasCorrect && !isCorrect) newCorrectCount = Math.max(0, newCorrectCount - 1);
+      if (!wasCorrect && isCorrect) newCorrectCount = Math.min(timesAsked, newCorrectCount + 1);
+
+      const correctPct = timesAsked > 0 ? (newCorrectCount / timesAsked) * 100 : 0;
+
+      batch.update(questionRef, {
+        stats: {
+          timesAsked,
+          avgMarks: Math.round(newAverage * 10) / 10,
+          correctPct: Math.round(correctPct * 10) / 10,
+          incorrectPct: Math.round((100 - correctPct) * 10) / 10,
+        },
+        updatedAt: Date.now(),
+      });
+      batchCount++;
+    });
+
+    if (batchCount > 0) {
+      await batch.commit();
+    }
+  } catch (err) {
+    console.warn("[updateQuestionStatsOnAmendmentBatch] Batch update encountered issue:", err);
+  }
+}
+
+export async function finalizeAttemptReview(
+  input: FinalizeReviewInput
+): Promise<ExamAttempt> {
+  const { attemptId, reviewerId, auditorScores, auditorComments, knowledgeGaps } = input;
+  const attemptRef = doc(db, COL, attemptId);
+  const finalReviewerId = reviewerId || auth.currentUser?.uid || "auditor";
+
+  const finalizedCore = await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(attemptRef);
+    if (!snap.exists()) {
+      throw new Error("Attempt not found.");
+    }
+
+    const attempt = normalizeAgentAnswers({
+      id: snap.id,
+      ...snap.data(),
+    } as ExamAttempt);
+
+    if (attempt.status === "reviewed") {
+      if (attempt.reviewedBy && attempt.reviewedBy !== finalReviewerId) {
+        throw new Error(
+          `Review Conflict: This attempt was already finalized by auditor "${attempt.reviewedBy}". Your changes were not applied to avoid overwriting finalized scores.`
+        );
+      }
+      return attempt;
+    }
+
+    if (attempt.status !== "submitted" && attempt.status !== "review_in_progress") {
+      throw new Error("This attempt is not available for review.");
+    }
+
+    // Validate that every question has a valid auditor score
+    for (const ans of attempt.answers) {
+      const score = auditorScores[ans.questionId];
+      if (score === undefined || score === null || isNaN(score)) {
+        throw new Error("Every question must have an auditor score before finalizing review.");
+      }
+      if (score < 0 || score > ans.maxMarks) {
+        throw new Error(`Score must be between 0 and ${ans.maxMarks}. Received: ${score}`);
+      }
+    }
+
+    const answers: AttemptAnswer[] = attempt.answers.map((answer) => {
+      const qId = answer.questionId;
+      const score = auditorScores[qId];
+      const comment = auditorComments?.[qId] !== undefined ? auditorComments[qId] : (answer.comments || "");
+      const gap = knowledgeGaps?.[qId];
+
+      // Separate and preserve AI suggested score
+      const aiSuggestedScore =
+        attempt.aiReview?.questionReviews?.find((qr) => qr.questionId === qId)?.aiSuggestedScore ??
+        answer.aiSuggestedScore;
+
+      const isChange = answer.marks !== undefined && answer.marks !== score;
+      const history = answer.scoreHistory ?? [];
+
+      const updatedAnswer: AttemptAnswer = {
+        ...answer,
+        marks: score, // Authoritative auditor score
+        comments: comment,
+        scoreHistory: isChange
+          ? [
+              ...history,
+              {
+                marks: score,
+                changedBy: finalReviewerId,
+                reason: "Score set during final review",
+                timestamp: Date.now(),
+              },
+            ]
+          : history,
+      };
+
+      if (aiSuggestedScore !== undefined && aiSuggestedScore !== null && !isNaN(aiSuggestedScore)) {
+        updatedAnswer.aiSuggestedScore = aiSuggestedScore;
+      } else {
+        delete updatedAnswer.aiSuggestedScore;
+      }
+
+      if (score < answer.maxMarks && gap) {
+        updatedAnswer.knowledgeGapCategory = gap;
+      } else {
+        delete updatedAnswer.knowledgeGapCategory;
+      }
+
+      const clean = stripUndefined(updatedAnswer);
+      if (clean.questionSnapshot) {
+        clean.questionSnapshot = stripUndefined(clean.questionSnapshot);
+      }
+      return clean;
+    });
+
+    const totalMarks = answers.reduce((sum, a) => sum + (a.marks ?? 0), 0);
+    const maxTotalMarks = answers.reduce((sum, a) => sum + a.maxMarks, 0);
+    const reviewedAt = Date.now();
+
+    const updateData = stripUndefined({
+      answers,
+      totalMarks,
+      maxTotalMarks,
+      status: "reviewed" as const,
+      reviewedBy: finalReviewerId,
+      reviewedAt,
+      analyticsFinalized: true,
+    });
+
+    transaction.update(attemptRef, updateData);
+
+    return {
+      ...attempt,
+      ...updateData,
+    };
+  });
+
+  // Link assignment if attempt has assignmentId
+  if (finalizedCore.assignmentId) {
+    try {
+      await updateDoc(doc(db, "assignments", finalizedCore.assignmentId), {
+        status: "reviewed",
+      });
+    } catch (e) {
+      console.warn("[finalizeAttemptReview] Failed to update linked assignment status:", e);
+    }
+  }
+
+  // Update question stats in a single batched atomic operation (Phase 3A optimization)
+  try {
+    await updateQuestionStatsBatch(finalizedCore.answers);
+  } catch (err) {
+    console.warn("[finalizeAttemptReview] Batch update encountered issue:", err);
+  }
+
+  const finalized = await getAttempt(finalizedCore.id);
+  if (!finalized) throw new Error("Review finalized but attempt could not be reloaded.");
+  return finalized;
+}
+
+/* =========================================================
    AMEND SCORECARD
    ========================================================= */
 
@@ -1123,6 +1542,11 @@ export interface QuestionAmendmentInput {
   marks: number;
   comments?: string;
   knowledgeGapCategory?: KnowledgeGapCategory;
+  aiSuggestedScore?: number;
+}
+
+export interface AmendScorecardOptions {
+  aiReview?: AttemptAiReview;
 }
 
 /**
@@ -1132,26 +1556,29 @@ export interface QuestionAmendmentInput {
  * - Uses a transaction reading fresh server state.
  * - Requires an explicit amendment reason.
  * - Modifies only explicitly amended grading fields.
- * - Recalculates totalMarks and maxTotalMarks.
- * - Appends to each amended question's scoreHistory with auditor ID, reason, and timestamp.
+ * - Recalculates totalMarks and maxTotalMarks using existing scoring formulas.
+ * - Preserves previous finalized scores and original scores.
+ * - Preserves AI suggested score distinct from auditor marks.
+ * - Appends to each amended question's scoreHistory with auditor ID, reason, previous marks, and timestamp.
+ * - Updates question analytics without double-counting timesAsked.
  * - Preserves attempt identity (id, examId, agentId, attemptNumber, startedAt).
- * - Preserves snapshots, agentAnswers, and original review timing.
- * - Protects question analytics from being double-counted.
+ * - Protects Firestore transactions from undefined values.
  */
 export async function amendScorecard(
   attemptId: string,
   amendments: QuestionAmendmentInput[],
   amendedBy: string,
-  reason: string
+  reason: string,
+  options?: AmendScorecardOptions
 ): Promise<ExamAttempt> {
-  const trimmedReason = reason.trim();
+  const trimmedReason = (reason || "").trim();
   if (!trimmedReason) {
     throw new Error("An explicit reason is required to amend a finalized scorecard.");
   }
 
   const attemptRef = doc(db, COL, attemptId);
 
-  return runTransaction(db, async (transaction) => {
+  const result = await runTransaction(db, async (transaction) => {
     const snap = await transaction.get(attemptRef);
     if (!snap.exists()) {
       throw new Error("Attempt not found.");
@@ -1184,7 +1611,26 @@ export async function amendScorecard(
         throw new Error(`Marks for question cannot exceed ${answer.maxMarks}.`);
       }
 
-      const isChanged = answer.marks !== marks || (comments !== undefined && comments !== (answer.comments || ""));
+      const qAiReview = options?.aiReview?.questionReviews?.find(
+        (qr: QuestionAiReview) => qr.questionId === answer.questionId
+      );
+      const aiSuggestedScore =
+        amendment.aiSuggestedScore !== undefined
+          ? amendment.aiSuggestedScore
+          : qAiReview?.aiSuggestedScore !== undefined
+          ? qAiReview.aiSuggestedScore
+          : answer.aiSuggestedScore;
+
+      const originalFinalScore =
+        answer.originalFinalScore !== undefined
+          ? answer.originalFinalScore
+          : typeof answer.marks === "number"
+          ? answer.marks
+          : undefined;
+
+      const isChanged =
+        answer.marks !== marks ||
+        (comments !== undefined && comments !== (answer.comments || ""));
       const history = answer.scoreHistory ?? [];
 
       const updatedAnswer: Record<string, any> = {
@@ -1196,6 +1642,9 @@ export async function amendScorecard(
               ...history,
               {
                 marks,
+                previousMarks: typeof answer.marks === "number" ? answer.marks : undefined,
+                previousScore: typeof answer.marks === "number" ? answer.marks : undefined,
+                aiSuggestedScore: typeof aiSuggestedScore === "number" ? aiSuggestedScore : undefined,
                 changedBy: amendedBy || "auditor",
                 reason: trimmedReason,
                 timestamp: now,
@@ -1203,6 +1652,16 @@ export async function amendScorecard(
             ]
           : history,
       };
+
+      if (originalFinalScore !== undefined) {
+        updatedAnswer.originalFinalScore = originalFinalScore;
+      }
+
+      if (aiSuggestedScore !== undefined && aiSuggestedScore !== null && !isNaN(aiSuggestedScore)) {
+        updatedAnswer.aiSuggestedScore = aiSuggestedScore;
+      } else {
+        delete updatedAnswer.aiSuggestedScore;
+      }
 
       if (marks < answer.maxMarks && knowledgeGapCategory) {
         updatedAnswer.knowledgeGapCategory = knowledgeGapCategory;
@@ -1222,20 +1681,49 @@ export async function amendScorecard(
     const maxTotalMarks = updatedAnswers.reduce((sum, a) => sum + a.maxMarks, 0);
 
     // Only update keys permitted by firestore.rules for auditor update
-    const updatePayload = stripUndefined({
+    const updatePayload: Record<string, any> = {
       answers: updatedAnswers,
       totalMarks,
       maxTotalMarks,
-    });
+      amendedAt: now,
+      amendedBy: amendedBy || "auditor",
+      amendmentReason: trimmedReason,
+    };
+
+    if (current.originalTotalMarks === undefined && typeof current.totalMarks === "number") {
+      updatePayload.originalTotalMarks = current.totalMarks;
+    }
+
+    if (options?.aiReview) {
+      updatePayload.aiReview = options.aiReview;
+      updatePayload.hasAiReview = options.aiReview.status === "complete";
+      updatePayload.aiReviewStatus = options.aiReview.status;
+    }
+
+    const cleanPayload = stripUndefined(updatePayload);
 
     console.debug("[amendScorecard] Committing amendment:", { attemptId, totalMarks, maxTotalMarks, amendedBy });
-    transaction.update(attemptRef, updatePayload);
+    transaction.update(attemptRef, cleanPayload);
+
+    const finalizedAttempt: ExamAttempt = {
+      ...current,
+      ...cleanPayload,
+    };
 
     return {
-      ...current,
-      ...updatePayload,
+      finalizedAttempt,
+      previousAnswers: current.answers,
     };
   });
+
+  // Non-blocking update of question analytics
+  try {
+    await updateQuestionStatsOnAmendmentBatch(result.previousAnswers, result.finalizedAttempt.answers);
+  } catch (err) {
+    console.warn("[amendScorecard] Batch question stats update warning:", err);
+  }
+
+  return result.finalizedAttempt;
 }
 
 /* =========================================================

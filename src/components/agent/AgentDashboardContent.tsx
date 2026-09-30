@@ -5,7 +5,8 @@ import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 import { fetchAssignedExams } from "@/lib/exams";
 import { fetchAttemptsForAgent, computeExamMasterScorecard } from "@/lib/attempts";
-import type { Exam, ExamAttempt } from "@/types";
+import { fetchAssignmentsForAgent } from "@/lib/assignments";
+import type { Exam, ExamAttempt, ExamAssignment } from "@/types";
 import {
   Badge,
   EmptyState,
@@ -24,6 +25,7 @@ export function AgentDashboardContent() {
 
   const [exams, setExams] = useState<Exam[]>([]);
   const [attempts, setAttempts] = useState<ExamAttempt[]>([]);
+  const [assignments, setAssignments] = useState<ExamAssignment[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedAttemptForModal, setSelectedAttemptForModal] = useState<ExamAttempt | null>(null);
 
@@ -39,7 +41,8 @@ export function AgentDashboardContent() {
     try {
       setLoading(true);
 
-      const [examData, attemptData] = await Promise.all([
+      const [assignmentData, examData, attemptData] = await Promise.all([
+        fetchAssignmentsForAgent(profile.uid),
         fetchAssignedExams(profile.uid),
         fetchAttemptsForAgent(profile.uid),
       ]);
@@ -53,6 +56,7 @@ export function AgentDashboardContent() {
         ).values()
       );
 
+      setAssignments(assignmentData);
       setExams(examData);
       setAttempts(uniqueAttempts);
     } catch (error) {
@@ -204,7 +208,22 @@ export function AgentDashboardContent() {
    * -------------------------------------------------------
    */
 
+  const actionableAssignments = assignments.filter(
+    (a) => a.status === "assigned" || a.status === "in_progress"
+  );
+
+  const reassignedAssignments = actionableAssignments.filter(
+    (a) => a.assignmentType === "reassigned"
+  );
+
+  const reassignedExamIds = new Set(reassignedAssignments.map((a) => a.examId));
+
   const assignedNotStarted = exams.filter((exam) => {
+    // If there is an active reassignment for this exam, it is presented in the Reassigned section
+    if (reassignedExamIds.has(exam.id)) {
+      return false;
+    }
+
     const examAttempts = attempts.filter(
       (attempt) => attempt.examId === exam.id
     );
@@ -358,6 +377,74 @@ export function AgentDashboardContent() {
           </div>
         )}
       </div>
+
+      {/* REASSIGNED EXAMS / ACTIONABLE REASSIGNMENTS */}
+      {reassignedAssignments.length > 0 && (
+        <div>
+          <div className="mb-2 flex items-center gap-2">
+            <h2 className="font-semibold text-slate-900 dark:text-slate-100">
+              Reassigned Exams
+            </h2>
+            <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+              {reassignedAssignments.length} actionable
+            </span>
+          </div>
+
+          <div className="space-y-3">
+            {reassignedAssignments.map((assignment) => {
+              const matchedExam = exams.find((e) => e.id === assignment.examId);
+              const cleanTitle = matchedExam
+                ? deriveCleanTitle(matchedExam, 0).title
+                : assignment.examName || "Reassigned Exam";
+
+              const modeLabel =
+                assignment.reassignmentMode === "wrong_only"
+                  ? "Wrong Answers Only"
+                  : assignment.reassignmentMode === "custom"
+                  ? "Custom Selection"
+                  : "All Questions";
+
+              const isResume = assignment.status === "in_progress";
+
+              return (
+                <div
+                  key={assignment.id}
+                  className="card flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-l-4 border-l-indigo-600 p-4 shadow-sm"
+                >
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-bold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+                        Reassigned Exam
+                      </span>
+                      {isResume && (
+                        <Badge color="amber">In Progress</Badge>
+                      )}
+                      <p className="font-bold text-slate-900 dark:text-slate-100">
+                        {cleanTitle}
+                      </p>
+                    </div>
+
+                    <p className="mt-1 text-sm font-medium text-slate-600 dark:text-slate-300">
+                      {modeLabel} · {assignment.questionIds.length} {assignment.questionIds.length === 1 ? "Question" : "Questions"}
+                    </p>
+
+                    <p className="mt-0.5 text-xs text-slate-400">
+                      Assigned on {new Date(assignment.assignedAt).toLocaleDateString()}
+                    </p>
+                  </div>
+
+                  <Link
+                    href={`/agent/exams/${assignment.examId}/take?assignmentId=${assignment.id}`}
+                    className="btn-primary shrink-0 self-start sm:self-center"
+                  >
+                    {isResume ? "Continue Reassigned Exam" : "Start Reassigned Exam"}
+                  </Link>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* AVAILABLE / RETEST EXAMS */}
 

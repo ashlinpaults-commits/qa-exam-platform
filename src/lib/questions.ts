@@ -201,21 +201,113 @@ export function stripUndefined<T>(obj: T): T {
   return obj;
 }
 
-// Produces a sanitized, immutable question snapshot with answer keys and
-// confidential auditor grading data strictly redacted.
-export function createRedactedQuestionSnapshot(q: Question): Question {
-  const {
-    correctOptionIndex: _droppedIndex,
-    expectedAnswer: _droppedExpected,
-    orderItems: _droppedOrder,
-    ...rest
-  } = q;
+// Fisher-Yates shuffle that guarantees the presentation order does not match
+// the authoritative correct order (for arrays with 2+ items).
+export function shuffleOrderItems<T>(items: T[]): T[] {
+  if (!items || items.length <= 1) return [...(items || [])];
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  // If the shuffle accidentally matches the original answer key, swap first two items
+  if (JSON.stringify(arr) === JSON.stringify(items) && arr.length > 1) {
+    [arr[0], arr[1]] = [arr[1], arr[0]];
+  }
+  return arr;
+}
 
-  return stripUndefined({
-    ...rest,
-    expectedAnswer: "",
-    stats: rest.stats || { timesAsked: 0, avgMarks: 0, correctPct: 0, incorrectPct: 0 },
-  });
+// Produces a strictly sanitized, immutable question snapshot for agents.
+// Answer keys, internal notes, auditor rubrics, and internal analytics are
+// completely excluded from the resulting document payload.
+export function createRedactedQuestionSnapshot(q: Question): Question {
+  const isDragDrop = q.type === "drag_drop_order";
+  const sourceOrder = q.orderItems || (q as any).shuffledOrderItems;
+  const shuffledOrderItems = isDragDrop && Array.isArray(sourceOrder) && sourceOrder.length > 0
+    ? shuffleOrderItems(sourceOrder)
+    : undefined;
+
+  const safe: Question = {
+    id: q.id,
+    questionText: q.questionText || "",
+    type: q.type,
+    difficulty: q.difficulty || "medium",
+    module: q.module || "",
+    feature: q.feature || "",
+    tags: Array.isArray(q.tags) ? q.tags : [],
+    expectedAnswer: "", // Cleared completely
+    version: q.version || 1,
+    createdBy: "",
+    createdAt: q.createdAt || 0,
+    updatedAt: q.updatedAt || 0,
+  };
+
+  // Safe presentation-only payloads
+  if (q.options && Array.isArray(q.options)) {
+    safe.options = q.options;
+  }
+  if (q.imageUrl) {
+    safe.imageUrl = q.imageUrl;
+  }
+  if (q.caseStudyContext) {
+    safe.caseStudyContext = q.caseStudyContext;
+  }
+  if (shuffledOrderItems) {
+    safe.shuffledOrderItems = shuffledOrderItems;
+  }
+
+  // Explicitly ensure NO sensitive or internal grading fields exist in the snapshot
+  const raw = safe as unknown as Record<string, unknown>;
+  delete raw.notes;
+  delete raw.auditorNotes;
+  delete raw.correctOptionIndex;
+  delete raw.orderItems; // Crucial: never expose the authoritative order to agents
+  delete raw.gradingCriteria;
+  delete raw.rubric;
+  delete raw.stats; // Internal question statistics hidden from agents
+  delete raw.scoreHistory;
+  delete raw.marks;
+  delete raw.aiSuggestedScore;
+  delete raw.aiReview;
+  delete raw.fingerprint;
+  delete raw.sourceId;
+  delete raw.legacyClassification;
+
+  return stripUndefined(safe);
+}
+
+/**
+ * Authoritatively extracts the raw text from an agent answer entry.
+ * Supports:
+ * - string: "answer"
+ * - object with answer: { answer: "answer" }
+ * - object with value: { value: "answer" }
+ * - object with text: { text: "answer" }
+ * - object with agentAnswer: { agentAnswer: "answer" }
+ * - array (e.g. drag & drop order items): JSON string
+ * - primitive number/boolean: string representation
+ * - empty object / null / undefined: "" (never returns "[object Object]")
+ */
+export function extractRawAnswerText(raw: unknown): string {
+  if (raw === undefined || raw === null) return "";
+  if (typeof raw === "string") return raw;
+  if (typeof raw === "number" || typeof raw === "boolean") return String(raw);
+  if (Array.isArray(raw)) {
+    return JSON.stringify(raw);
+  }
+  if (typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.answer === "string") return obj.answer;
+    if (typeof obj.value === "string") return obj.value;
+    if (typeof obj.text === "string") return obj.text;
+    if (typeof obj.agentAnswer === "string") return obj.agentAnswer;
+    if (obj.answer !== undefined && obj.answer !== null) return String(obj.answer);
+    if (obj.value !== undefined && obj.value !== null) return String(obj.value);
+    if (obj.text !== undefined && obj.text !== null) return String(obj.text);
+    if (obj.agentAnswer !== undefined && obj.agentAnswer !== null) return String(obj.agentAnswer);
+    return "";
+  }
+  return "";
 }
 
 async function commitWithRetry(batch: ReturnType<typeof writeBatch>, maxRetries = 3): Promise<{ ok: boolean; error?: string }> {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { getExam } from "@/lib/exams";
 import {
   startAttempt,
@@ -30,6 +30,8 @@ import {
 export function TakeExam({ examId }: { examId: string }) {
   const { profile } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const assignmentId = searchParams.get("assignmentId") || undefined;
   const [exam, setExam] = useState<Exam | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [attempt, setAttempt] = useState<ExamAttempt | null>(null);
@@ -71,7 +73,7 @@ export function TakeExam({ examId }: { examId: string }) {
         if (!e) throw new Error("This exam is no longer available.");
         setExam(e);
 
-        const attemptId = await startAttempt(e, profile.uid);
+        const attemptId = await startAttempt(e, profile.uid, assignmentId);
         if (cancelled) return;
         const a = await getAttempt(attemptId);
         if (cancelled) return;
@@ -114,13 +116,19 @@ export function TakeExam({ examId }: { examId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [examId, profile?.uid]);
+  }, [examId, profile?.uid, assignmentId]);
+
+  const currentFlushPromiseRef = useRef<Promise<boolean> | null>(null);
+  const [navigating, setNavigating] = useState(false);
 
   // Serialized atomic flush of all dirty answers
   const flushDirtyAnswers = useCallback(async (): Promise<boolean> => {
     if (!attempt || dirtyKeysRef.current.size === 0) return true;
     if (saveInProgressRef.current) {
       flushRequestedRef.current = true;
+      if (currentFlushPromiseRef.current) {
+        await currentFlushPromiseRef.current;
+      }
       return true;
     }
 
@@ -132,37 +140,64 @@ export function TakeExam({ examId }: { examId: string }) {
       toSave[qid] = answersRef.current[qid] ?? "";
     });
 
-    try {
-      await saveAllAnswers(attempt.id, toSave);
-      Object.entries(toSave).forEach(([qid, val]) => {
-        if (answersRef.current[qid] === val) {
-          dirtyKeysRef.current.delete(qid);
+    const flushPromise = (async () => {
+      try {
+        await saveAllAnswers(attempt.id, toSave);
+        Object.entries(toSave).forEach(([qid, val]) => {
+          if (answersRef.current[qid] === val) {
+            dirtyKeysRef.current.delete(qid);
+          }
+          lastSavedAnswerRef.current[qid] = val;
+        });
+        setSaveStatus("saved");
+        return true;
+      } catch (err) {
+        console.error("Failed to save answers", err);
+        setSaveStatus("error");
+        return false;
+      } finally {
+        saveInProgressRef.current = false;
+        currentFlushPromiseRef.current = null;
+        if (flushRequestedRef.current) {
+          flushRequestedRef.current = false;
+          flushDirtyAnswers();
         }
-        lastSavedAnswerRef.current[qid] = val;
-      });
-      setSaveStatus("saved");
-      return true;
-    } catch (err) {
-      console.error("Failed to save answers", err);
-      setSaveStatus("error");
-      return false;
-    } finally {
-      saveInProgressRef.current = false;
-      if (flushRequestedRef.current) {
-        flushRequestedRef.current = false;
-        flushDirtyAnswers();
       }
-    }
+    })();
+
+    currentFlushPromiseRef.current = flushPromise;
+    return flushPromise;
   }, [attempt]);
 
-  // Clean up debounce timer on unmount and perform final synchronous flush if needed
+  // Clean up debounce timer on unmount and listen for page visibility / unload
   useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (dirtyKeysRef.current.size > 0 && attempt) {
+        const toSave: Record<string, string> = {};
+        dirtyKeysRef.current.forEach((qid) => {
+          toSave[qid] = answersRef.current[qid] ?? "";
+        });
+        saveAllAnswers(attempt.id, toSave).catch(() => {});
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden" && dirtyKeysRef.current.size > 0) {
+        flushDirtyAnswers();
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
     return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
     };
-  }, []);
+  }, [attempt, flushDirtyAnswers]);
 
   const handleAnswerChange = (qId: string, val: string) => {
     dirtyKeysRef.current.add(qId);
@@ -181,16 +216,22 @@ export function TakeExam({ examId }: { examId: string }) {
     }, 800);
   };
 
-  // Immediate flush before switching questions
-  const handleNavigate = (newIndex: number) => {
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
+  // Immediate flush before switching questions with async await protection
+  const handleNavigate = async (newIndex: number) => {
+    if (navigating || newIndex < 0 || newIndex >= questions.length) return;
+    setNavigating(true);
+    try {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      if (dirtyKeysRef.current.size > 0 || saveInProgressRef.current) {
+        await flushDirtyAnswers();
+      }
+      setIndex(newIndex);
+    } finally {
+      setNavigating(false);
     }
-    if (dirtyKeysRef.current.size > 0) {
-      flushDirtyAnswers();
-    }
-    setIndex(newIndex);
   };
 
   // Pre-submission review modal trigger
@@ -199,7 +240,7 @@ export function TakeExam({ examId }: { examId: string }) {
       clearTimeout(debounceTimerRef.current);
       debounceTimerRef.current = null;
     }
-    if (dirtyKeysRef.current.size > 0) {
+    if (dirtyKeysRef.current.size > 0 || saveInProgressRef.current) {
       await flushDirtyAnswers();
     }
     setSubmitError("");
