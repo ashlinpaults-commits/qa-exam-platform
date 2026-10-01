@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { fetchExams } from "@/lib/exams";
 import {
@@ -45,6 +45,9 @@ import {
   Loader2,
   Check,
   XCircle,
+  Search,
+  User,
+  Users,
 } from "lucide-react";
 import { AmendScorecardModal } from "./AmendScorecardModal";
 import { ReassignModal } from "./ReassignModal";
@@ -77,6 +80,17 @@ interface ReviewListItem {
   reattemptSource?: string;
 }
 
+interface AgentReviewGroup {
+  agentId: string;
+  agentName: string;
+  items: ReviewListItem[];
+  pendingCount: number;
+  reviewedCount: number;
+  inProgressCount: number;
+  hasReassignedPending: boolean;
+  masterScorecard: ReturnType<typeof computeExamMasterScorecard> | null;
+}
+
 export function ReviewScreen() {
   const { profile } = useAuth();
   const params = useParams();
@@ -102,6 +116,8 @@ export function ReviewScreen() {
   const [cancelReason, setCancelReason] = useState("");
   const [isCancelling, setIsCancelling] = useState(false);
   const [viewingMergedAgentId, setViewingMergedAgentId] = useState<string | null>(null);
+  const [expandedAgents, setExpandedAgents] = useState<Record<string, boolean>>({});
+  const [agentFilter, setAgentFilter] = useState("");
 
   const selectedExamDoc = useMemo(
     () => exams.find((e) => e.id === selectedExam),
@@ -274,8 +290,97 @@ export function ReviewScreen() {
     return items.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   }, [attempts, assignments]);
 
-  function userName(uid: string) {
-    return users.find((u) => u.uid === uid)?.name ?? uid.slice(0, 8);
+  const userName = useCallback(
+    (uid: string) => users.find((u) => u.uid === uid)?.name ?? uid.slice(0, 8),
+    [users]
+  );
+
+  // Group unifiedItems by agent, sorted alphabetically by agent name.
+  // Inside each agent group, attempts are strictly ordered: Attempt #1, Attempt #2, Attempt #3...
+  const agentGroups: AgentReviewGroup[] = useMemo(() => {
+    const groupsMap = new Map<string, ReviewListItem[]>();
+
+    for (const item of unifiedItems) {
+      const list = groupsMap.get(item.agentId) || [];
+      list.push(item);
+      groupsMap.set(item.agentId, list);
+    }
+
+    const result: AgentReviewGroup[] = [];
+
+    groupsMap.forEach((items, agentId) => {
+      // Sort attempts for this agent strictly ascending: Attempt #1, Attempt #2, Attempt #3...
+      const sortedItems = [...items].sort((a, b) => {
+        const attemptA = a.attemptNumber || 0;
+        const attemptB = b.attemptNumber || 0;
+        if (attemptA !== attemptB) {
+          return attemptA - attemptB;
+        }
+        return (a.timestamp || 0) - (b.timestamp || 0);
+      });
+
+      const agentAttempts = attempts.filter((a) => a.agentId === agentId);
+      const reviewedAttempts = agentAttempts.filter((a) => a.status === "reviewed");
+      const pendingAttempts = agentAttempts.filter(
+        (a) => a.status === "submitted" || a.status === "review_in_progress"
+      );
+      const inProgressAttempts = agentAttempts.filter((a) => a.status === "in_progress");
+      const hasReassignedPending = sortedItems.some(
+        (i) => i.isPendingReassignment && i.status === "assigned"
+      );
+
+      let masterScorecard = null;
+      if (selectedExamDoc && reviewedAttempts.length > 0) {
+        try {
+          masterScorecard = computeExamMasterScorecard(selectedExamDoc, agentAttempts);
+        } catch (err) {
+          console.warn("Failed to compute master scorecard for agent", agentId, err);
+        }
+      }
+
+      result.push({
+        agentId,
+        agentName: userName(agentId),
+        items: sortedItems,
+        pendingCount: pendingAttempts.length,
+        reviewedCount: reviewedAttempts.length,
+        inProgressCount: inProgressAttempts.length,
+        hasReassignedPending,
+        masterScorecard,
+      });
+    });
+
+    // Sort agents alphabetically A-Z by agent name
+    return result.sort((a, b) =>
+      a.agentName.localeCompare(b.agentName, undefined, { sensitivity: "base" })
+    );
+  }, [unifiedItems, attempts, selectedExamDoc, userName]);
+
+  const filteredAgentGroups = useMemo(() => {
+    if (!agentFilter.trim()) return agentGroups;
+    const q = agentFilter.toLowerCase().trim();
+    return agentGroups.filter(
+      (g) => g.agentName.toLowerCase().includes(q) || g.agentId.toLowerCase().includes(q)
+    );
+  }, [agentGroups, agentFilter]);
+
+  function toggleAgentExpanded(agentId: string) {
+    setExpandedAgents((prev) => ({
+      ...prev,
+      [agentId]: !prev[agentId],
+    }));
+  }
+
+  function expandAllAgents() {
+    const all: Record<string, boolean> = {};
+    for (const g of filteredAgentGroups) {
+      all[g.agentId] = true;
+    }
+    setExpandedAgents(all);
+  }
+
+  function collapseAllAgents() {
+    setExpandedAgents({});
   }
 
   const pendingCount = attempts.filter(
@@ -296,6 +401,8 @@ export function ReviewScreen() {
             setSelectedExam(e.target.value);
             setExpanded(null);
             setMessage(null);
+            setExpandedAgents({});
+            setAgentFilter("");
           }}
         >
           <option value="">Select an exam...</option>
@@ -349,245 +456,389 @@ export function ReviewScreen() {
         />
       ) : (
         <div className="space-y-4">
-          {unifiedItems.map((item) => {
-            // PENDING REASSIGNMENT CARD
-            if (item.isPendingReassignment && item.assignment) {
-              const asg = item.assignment;
-              const isExpanded = expanded === item.key;
-
-              return (
-                <div
-                  key={item.key}
-                  className="overflow-hidden rounded-xl border border-indigo-200 bg-white shadow-sm dark:border-indigo-900/60 dark:bg-slate-900 border-l-4 border-l-indigo-500"
-                >
-                  <button
-                    type="button"
-                    className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-slate-50/70 dark:hover:bg-slate-800/50"
-                    onClick={() => setExpanded(isExpanded ? null : item.key)}
-                  >
-                    <div className="flex min-w-0 items-center gap-3">
-                      {isExpanded ? (
-                        <ChevronDown className="h-4 w-4 shrink-0 text-indigo-600" />
-                      ) : (
-                        <ChevronRight className="h-4 w-4 shrink-0 text-indigo-600" />
-                      )}
-
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <p className="font-semibold text-slate-900 dark:text-slate-100">
-                            {userName(item.agentId)} · Attempt #{item.attemptNumber}
-                          </p>
-                          <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
-                            Reattempt · {item.reattemptSource || "Reassigned"}
-                          </span>
-                        </div>
-
-                        {item.status === "cancelled" ? (
-                          <p className="text-xs text-slate-500">
-                            Cancelled {asg.cancelledBy ? `by ${userName(asg.cancelledBy)}` : ""} on {new Date(item.timestamp).toLocaleString()} · {asg.questionIds.length} {asg.questionIds.length === 1 ? "question" : "questions"}
-                          </p>
-                        ) : (
-                          <p className="text-xs text-slate-500">
-                            Reassigned on {new Date(item.timestamp).toLocaleString()} · {asg.questionIds.length} {asg.questionIds.length === 1 ? "question" : "questions"}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="flex shrink-0 items-center gap-2">
-                      {item.status === "cancelled" ? (
-                        <Badge color="slate">Cancelled</Badge>
-                      ) : (
-                        <>
-                          <Badge color="indigo">Reassigned · Awaiting Agent</Badge>
-                          <button
-                            type="button"
-                            className="flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-red-600 shadow-sm hover:bg-red-50 dark:border-red-800 dark:bg-slate-800 dark:text-red-400 dark:hover:bg-red-950/40"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setCancellingAssignment(asg);
-                            }}
-                            title="Cancel this reassignment"
-                          >
-                            <XCircle className="h-3 w-3" />
-                            Cancel Reassignment
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </button>
-
-                  {isExpanded && (
-                    <div className="border-t border-slate-100 p-4 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/20 space-y-3">
-                      <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
-                        <span>Scope: <strong className="text-slate-800 dark:text-slate-200">{item.reattemptSource}</strong> ({asg.questionIds.length} questions)</span>
-                        <span className="text-slate-400">Agent notified · Attempt begins when started</span>
-                      </div>
-
-                      <div className="space-y-2">
-                        {asg.questionIds.map((qId, idx) => {
-                          const q = questionCache[qId] || selectedExamDoc?.questionSnapshots?.[qId];
-                          return (
-                            <div key={qId} className="rounded-lg border border-slate-200 bg-white p-3 text-xs dark:border-slate-700 dark:bg-slate-800">
-                              <div className="flex items-center justify-between text-slate-500 mb-1">
-                                <span className="font-mono font-bold">Question #{idx + 1}</span>
-                                <span className="capitalize">{q?.type?.replace("_", " ") || "Question"}</span>
-                              </div>
-                              <p className="text-slate-800 dark:text-slate-200 font-medium">
-                                {q?.questionText || `Question ID: ${qId}`}
-                              </p>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            }
-
-            // REAL ATTEMPT CARD
-            const attempt = item.attempt!;
-            const isReviewed = attempt.status === "reviewed";
-
-            return (
-              <div
-                key={attempt.id}
-                className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900"
-              >
-                {/* Attempt Header Bar */}
+          {/* Agent Search Filter & Bulk Expand/Collapse Toolbar */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Search agent name..."
+                  value={agentFilter}
+                  onChange={(e) => setAgentFilter(e.target.value)}
+                  className="input h-9 w-64 pl-9 text-xs"
+                />
+              </div>
+              {agentFilter && (
                 <button
                   type="button"
-                  className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-slate-50/70 dark:hover:bg-slate-800/50"
-                  onClick={() =>
-                    setExpanded(expanded === attempt.id ? null : attempt.id)
-                  }
+                  onClick={() => setAgentFilter("")}
+                  className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
                 >
-                  <div className="flex min-w-0 items-center gap-3">
-                    {expanded === attempt.id ? (
-                      <ChevronDown className="h-4 w-4 shrink-0" />
-                    ) : (
-                      <ChevronRight className="h-4 w-4 shrink-0" />
-                    )}
+                  Clear
+                </button>
+              )}
+            </div>
 
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="font-medium text-slate-900 dark:text-slate-100">
-                          {userName(attempt.agentId)} · Attempt #{attempt.attemptNumber}
-                        </p>
-                        {attempt.isReattempt && (
-                          <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300">
-                            Reattempt{attempt.reattemptSource ? ` · ${attempt.reattemptSource.replace("_", " ")}` : ""}
-                          </span>
-                        )}
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-slate-500">
+                {filteredAgentGroups.length} {filteredAgentGroups.length === 1 ? "Agent" : "Agents"} ({unifiedItems.length} total {unifiedItems.length === 1 ? "attempt" : "attempts"})
+              </span>
+              <div className="h-4 w-px bg-slate-200 dark:bg-slate-700" />
+              <button
+                type="button"
+                onClick={expandAllAgents}
+                className="rounded px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+              >
+                Expand All
+              </button>
+              <button
+                type="button"
+                onClick={collapseAllAgents}
+                className="rounded px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+              >
+                Collapse All
+              </button>
+            </div>
+          </div>
+
+          {filteredAgentGroups.length === 0 ? (
+            <EmptyState
+              title="No agents match your filter"
+              subtitle={`No agents found matching "${agentFilter}". Try searching for another name.`}
+            />
+          ) : (
+            <div className="space-y-3">
+              {filteredAgentGroups.map((group) => {
+                const isAgentExpanded = !!expandedAgents[group.agentId];
+
+                return (
+                  <div
+                    key={group.agentId}
+                    className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900 transition-all"
+                  >
+                    {/* Agent Group Header (Accordion) */}
+                    <button
+                      type="button"
+                      className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-slate-50/70 dark:hover:bg-slate-800/50"
+                      onClick={() => toggleAgentExpanded(group.agentId)}
+                    >
+                      <div className="flex min-w-0 items-center gap-3">
+                        <div className="text-slate-400">
+                          {isAgentExpanded ? (
+                            <ChevronDown className="h-5 w-5 text-brand-600" />
+                          ) : (
+                            <ChevronRight className="h-5 w-5" />
+                          )}
+                        </div>
+
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-100 font-bold text-slate-700 dark:bg-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700">
+                          {group.agentName.charAt(0).toUpperCase()}
+                        </div>
+
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-slate-900 dark:text-slate-100 text-base">
+                              {group.agentName}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-500">
+                            {group.items.length} {group.items.length === 1 ? "attempt" : "attempts"}
+                            {group.reviewedCount > 0 ? ` · ${group.reviewedCount} reviewed` : ""}
+                            {group.inProgressCount > 0 ? ` · ${group.inProgressCount} in progress` : ""}
+                          </p>
+                        </div>
                       </div>
 
-                      <p className="text-xs text-slate-500">
-                        {attempt.timeTakenSeconds
-                          ? `${Math.round(attempt.timeTakenSeconds / 60)} min · `
-                          : ""}
-                        {new Date(attempt.startedAt).toLocaleString()}
-                      </p>
-                    </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {group.pendingCount > 0 && (
+                          <Badge color="amber">{group.pendingCount} pending review</Badge>
+                        )}
+                        {group.hasReassignedPending && (
+                          <Badge color="indigo">Reassigned</Badge>
+                        )}
+                        {group.masterScorecard && group.masterScorecard.masterTotalMarks > 0 && (
+                          <Badge color="green">
+                            Master: {group.masterScorecard.currentMasterScore}/{group.masterScorecard.masterTotalMarks} ({Math.round(group.masterScorecard.masterPercentage)}%)
+                          </Badge>
+                        )}
+
+                        {group.reviewedCount > 0 && (
+                          <button
+                            type="button"
+                            className="flex items-center gap-1.5 rounded-lg border border-brand-200 bg-white px-2.5 py-1 text-xs font-semibold text-brand-700 shadow-sm hover:bg-brand-50 dark:border-brand-800 dark:bg-slate-800 dark:text-brand-300 dark:hover:bg-brand-950/40"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setViewingMergedAgentId(group.agentId);
+                            }}
+                            title="View Cumulative Master Scorecard across all attempts"
+                          >
+                            <Layers className="h-3.5 w-3.5" />
+                            Master Scorecard
+                          </button>
+                        )}
+                      </div>
+                    </button>
+
+                    {/* Agent Attempts List (Attempt 1, 2, 3...) */}
+                    {isAgentExpanded && (
+                      <div className="border-t border-slate-100 bg-slate-50/50 p-4 dark:border-slate-800 dark:bg-slate-950/30">
+                        <div className="mb-3 flex items-center justify-between text-xs font-medium text-slate-500">
+                          <span className="flex items-center gap-1.5">
+                            <Users className="h-3.5 w-3.5 text-slate-400" />
+                            Attempts for <strong className="text-slate-700 dark:text-slate-300">{group.agentName}</strong> (Sequential: Attempt 1, 2, 3...)
+                          </span>
+                          <span>{group.items.length} {group.items.length === 1 ? "entry" : "entries"}</span>
+                        </div>
+
+                        <div className="space-y-3 pl-2 sm:pl-4 border-l-2 border-slate-200 dark:border-slate-800 ml-2">
+                          {group.items.map((item) => {
+                            // PENDING REASSIGNMENT CARD
+                            if (item.isPendingReassignment && item.assignment) {
+                              const asg = item.assignment;
+                              const isExpanded = expanded === item.key;
+
+                              return (
+                                <div
+                                  key={item.key}
+                                  className="overflow-hidden rounded-xl border border-indigo-200 bg-white shadow-sm dark:border-indigo-900/60 dark:bg-slate-900 border-l-4 border-l-indigo-500"
+                                >
+                                  <button
+                                    type="button"
+                                    className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-slate-50/70 dark:hover:bg-slate-800/50"
+                                    onClick={() => setExpanded(isExpanded ? null : item.key)}
+                                  >
+                                    <div className="flex min-w-0 items-center gap-3">
+                                      {isExpanded ? (
+                                        <ChevronDown className="h-4 w-4 shrink-0 text-indigo-600" />
+                                      ) : (
+                                        <ChevronRight className="h-4 w-4 shrink-0 text-indigo-600" />
+                                      )}
+
+                                      <div className="min-w-0">
+                                        <div className="flex items-center gap-2">
+                                          <p className="font-semibold text-slate-900 dark:text-slate-100">
+                                            Attempt #{item.attemptNumber}
+                                          </p>
+                                          <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+                                            Reattempt · {item.reattemptSource || "Reassigned"}
+                                          </span>
+                                        </div>
+
+                                        {item.status === "cancelled" ? (
+                                          <p className="text-xs text-slate-500">
+                                            Cancelled {asg.cancelledBy ? `by ${userName(asg.cancelledBy)}` : ""} on {new Date(item.timestamp).toLocaleString()} · {asg.questionIds.length} {asg.questionIds.length === 1 ? "question" : "questions"}
+                                          </p>
+                                        ) : (
+                                          <p className="text-xs text-slate-500">
+                                            Reassigned on {new Date(item.timestamp).toLocaleString()} · {asg.questionIds.length} {asg.questionIds.length === 1 ? "question" : "questions"}
+                                          </p>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    <div className="flex shrink-0 items-center gap-2">
+                                      {item.status === "cancelled" ? (
+                                        <Badge color="slate">Cancelled</Badge>
+                                      ) : (
+                                        <>
+                                          <Badge color="indigo">Reassigned · Awaiting Agent</Badge>
+                                          <button
+                                            type="button"
+                                            className="flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-red-600 shadow-sm hover:bg-red-50 dark:border-red-800 dark:bg-slate-800 dark:text-red-400 dark:hover:bg-red-950/40"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setCancellingAssignment(asg);
+                                            }}
+                                            title="Cancel this reassignment"
+                                          >
+                                            <XCircle className="h-3 w-3" />
+                                            Cancel Reassignment
+                                          </button>
+                                        </>
+                                      )}
+                                    </div>
+                                  </button>
+
+                                  {isExpanded && (
+                                    <div className="border-t border-slate-100 p-4 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/20 space-y-3">
+                                      <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
+                                        <span>Scope: <strong className="text-slate-800 dark:text-slate-200">{item.reattemptSource}</strong> ({asg.questionIds.length} questions)</span>
+                                        <span className="text-slate-400">Agent notified · Attempt begins when started</span>
+                                      </div>
+
+                                      <div className="space-y-2">
+                                        {asg.questionIds.map((qId, idx) => {
+                                          const q = questionCache[qId] || selectedExamDoc?.questionSnapshots?.[qId];
+                                          return (
+                                            <div key={qId} className="rounded-lg border border-slate-200 bg-white p-3 text-xs dark:border-slate-700 dark:bg-slate-800">
+                                              <div className="flex items-center justify-between text-slate-500 mb-1">
+                                                <span className="font-mono font-bold">Question #{idx + 1}</span>
+                                                <span className="capitalize">{q?.type?.replace("_", " ") || "Question"}</span>
+                                              </div>
+                                              <p className="text-slate-800 dark:text-slate-200 font-medium">
+                                                {q?.questionText || `Question ID: ${qId}`}
+                                              </p>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            }
+
+                            // REAL ATTEMPT CARD
+                            const attempt = item.attempt!;
+                            const isReviewed = attempt.status === "reviewed";
+
+                            return (
+                              <div
+                                key={attempt.id}
+                                className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900"
+                              >
+                                {/* Attempt Header Bar */}
+                                <button
+                                  type="button"
+                                  className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-slate-50/70 dark:hover:bg-slate-800/50"
+                                  onClick={() =>
+                                    setExpanded(expanded === attempt.id ? null : attempt.id)
+                                  }
+                                >
+                                  <div className="flex min-w-0 items-center gap-3">
+                                    {expanded === attempt.id ? (
+                                      <ChevronDown className="h-4 w-4 shrink-0" />
+                                    ) : (
+                                      <ChevronRight className="h-4 w-4 shrink-0" />
+                                    )}
+
+                                    <div className="min-w-0">
+                                      <div className="flex items-center gap-2">
+                                        <p className="font-semibold text-slate-900 dark:text-slate-100">
+                                          Attempt #{attempt.attemptNumber}
+                                        </p>
+                                        {attempt.isReattempt && (
+                                          <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300">
+                                            Reattempt{attempt.reattemptSource ? ` · ${attempt.reattemptSource.replace("_", " ")}` : ""}
+                                          </span>
+                                        )}
+                                      </div>
+
+                                      <p className="text-xs text-slate-500">
+                                        {attempt.timeTakenSeconds
+                                          ? `${Math.round(attempt.timeTakenSeconds / 60)} min · `
+                                          : ""}
+                                        {new Date(attempt.startedAt).toLocaleString()}
+                                      </p>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex shrink-0 items-center gap-2">
+                                    {/* Master Scorecard Trigger */}
+                                    {attempts.filter((a) => a.agentId === attempt.agentId && a.status === "reviewed").length > 1 && (
+                                      <button
+                                        type="button"
+                                        className="flex items-center gap-1 rounded-lg border border-brand-200 bg-white px-2 py-1 text-[11px] font-semibold text-brand-700 shadow-sm hover:bg-brand-50 dark:border-brand-800 dark:bg-slate-800 dark:text-brand-300 dark:hover:bg-brand-950/40"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setViewingMergedAgentId(attempt.agentId);
+                                        }}
+                                        title="View Master Scorecard"
+                                      >
+                                        <Layers className="h-3 w-3" />
+                                        Master Scorecard
+                                      </button>
+                                    )}
+
+                                    {/* Quick Reassign button directly in header if reviewed */}
+                                    {isReviewed && (
+                                      <button
+                                        type="button"
+                                        className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 shadow-sm hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700/50"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setReassigningAttempt(attempt);
+                                        }}
+                                        title="Reassign this exam"
+                                      >
+                                        <RotateCcw className="h-3 w-3 text-brand-600" />
+                                        Reassign
+                                      </button>
+                                    )}
+
+                                    {/* Status Badge */}
+                                    {isReviewed && attempt.maxTotalMarks ? (
+                                      <Badge
+                                        color={
+                                          attempt.totalMarks === attempt.maxTotalMarks
+                                            ? "green"
+                                            : "brand"
+                                        }
+                                      >
+                                        {attempt.totalMarks} / {attempt.maxTotalMarks}
+                                      </Badge>
+                                    ) : (
+                                      <Badge
+                                        color={
+                                          attempt.status === "submitted"
+                                            ? "amber"
+                                            : attempt.status === "review_in_progress"
+                                            ? "brand"
+                                            : "slate"
+                                        }
+                                      >
+                                        {formatStatus(attempt.status)}
+                                      </Badge>
+                                    )}
+                                  </div>
+                                </button>
+
+                                {/* Expanded Attempt Content */}
+                                {expanded === attempt.id && (
+                                  <div className="border-t border-slate-100 p-4 dark:border-slate-800">
+                                    {isReviewed ? (
+                                      /* REVIEWED VIEW */
+                                      <ReviewedAttemptView
+                                        attempt={attempt}
+                                        exam={selectedExamDoc}
+                                        questionCache={questionCache}
+                                        onAmend={() => setAmendingAttempt(attempt)}
+                                        onReassign={() => setReassigningAttempt(attempt)}
+                                      />
+                                    ) : (
+                                      /* ACTIONABLE AUDITOR REVIEW VIEW (LOW-CLICK) */
+                                      <AttemptAuditorReview
+                                        attempt={attempt}
+                                        exam={selectedExamDoc}
+                                        questionCache={questionCache}
+                                        reviewerId={profile?.uid ?? ""}
+                                        users={users}
+                                        onFinalized={(finalized) => {
+                                          patchAttempt(finalized);
+                                          setMessage({
+                                            type: "success",
+                                            text: `Review successfully finalized for ${userName(attempt.agentId)}. Authoritative score: ${finalized.totalMarks} / ${finalized.maxTotalMarks}.`,
+                                          });
+                                        }}
+                                        onSavedDraft={(draft) => {
+                                          patchAttempt(draft);
+                                        }}
+                                      />
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </div>
-
-                  <div className="flex shrink-0 items-center gap-2">
-                    {/* Master Scorecard Trigger */}
-                    {attempts.filter((a) => a.agentId === attempt.agentId && a.status === "reviewed").length > 1 && (
-                      <button
-                        type="button"
-                        className="flex items-center gap-1 rounded-lg border border-brand-200 bg-white px-2 py-1 text-[11px] font-semibold text-brand-700 shadow-sm hover:bg-brand-50 dark:border-brand-800 dark:bg-slate-800 dark:text-brand-300 dark:hover:bg-brand-950/40"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setViewingMergedAgentId(attempt.agentId);
-                        }}
-                        title="View Master Scorecard"
-                      >
-                        <Layers className="h-3 w-3" />
-                        Master Scorecard
-                      </button>
-                    )}
-
-                    {/* Quick Reassign button directly in header if reviewed */}
-                    {isReviewed && (
-                      <button
-                        type="button"
-                        className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 shadow-sm hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700/50"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setReassigningAttempt(attempt);
-                        }}
-                        title="Reassign this exam"
-                      >
-                        <RotateCcw className="h-3 w-3 text-brand-600" />
-                        Reassign
-                      </button>
-                    )}
-
-                    {/* Status Badge */}
-                    {isReviewed && attempt.maxTotalMarks ? (
-                      <Badge
-                        color={
-                          attempt.totalMarks === attempt.maxTotalMarks
-                            ? "green"
-                            : "brand"
-                        }
-                      >
-                        {attempt.totalMarks} / {attempt.maxTotalMarks}
-                      </Badge>
-                    ) : (
-                      <Badge
-                        color={
-                          attempt.status === "submitted"
-                            ? "amber"
-                            : attempt.status === "review_in_progress"
-                            ? "brand"
-                            : "slate"
-                        }
-                      >
-                        {formatStatus(attempt.status)}
-                      </Badge>
-                    )}
-                  </div>
-                </button>
-
-                {/* Expanded Attempt Content */}
-                {expanded === attempt.id && (
-                  <div className="border-t border-slate-100 p-4 dark:border-slate-800">
-                    {isReviewed ? (
-                      /* REVIEWED VIEW */
-                      <ReviewedAttemptView
-                        attempt={attempt}
-                        exam={selectedExamDoc}
-                        questionCache={questionCache}
-                        onAmend={() => setAmendingAttempt(attempt)}
-                        onReassign={() => setReassigningAttempt(attempt)}
-                      />
-                    ) : (
-                      /* ACTIONABLE AUDITOR REVIEW VIEW (LOW-CLICK) */
-                      <AttemptAuditorReview
-                        attempt={attempt}
-                        exam={selectedExamDoc}
-                        questionCache={questionCache}
-                        reviewerId={profile?.uid ?? ""}
-                        users={users}
-                        onFinalized={(finalized) => {
-                          patchAttempt(finalized);
-                          setMessage({
-                            type: "success",
-                            text: `Review successfully finalized for ${userName(attempt.agentId)}. Authoritative score: ${finalized.totalMarks} / ${finalized.maxTotalMarks}.`,
-                          });
-                        }}
-                        onSavedDraft={(draft) => {
-                          patchAttempt(draft);
-                        }}
-                      />
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -612,6 +863,10 @@ export function ReviewScreen() {
             });
             // Optimistically insert pending assignment so Review Attempts displays Attempt #2 immediately
             setAssignments((prev) => [assignment, ...prev.filter((a) => a.id !== assignment.id)]);
+            setExpandedAgents((prev) => ({
+              ...prev,
+              [reassigningAttempt.agentId]: true,
+            }));
             setReassigningAttempt(null);
 
             // Update reattempt permissions in local state
