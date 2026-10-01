@@ -6,6 +6,8 @@ import { useAuth } from "@/context/AuthContext";
 import { fetchAssignedExams } from "@/lib/exams";
 import { fetchAttemptsForAgent, computeExamMasterScorecard } from "@/lib/attempts";
 import { fetchAssignmentsForAgent } from "@/lib/assignments";
+import { db } from "@/lib/firebase";
+import { collection, query, where, onSnapshot } from "firebase/firestore";
 import type { Exam, ExamAttempt, ExamAssignment } from "@/types";
 import {
   Badge,
@@ -31,9 +33,6 @@ export function AgentDashboardContent() {
 
   /**
    * Load the dashboard from Firestore.
-   *
-   * Attempts are deduplicated by Firestore document ID so the
-   * same document can never accidentally appear twice in state.
    */
   const loadDashboard = useCallback(async () => {
     if (!profile?.uid) return;
@@ -72,6 +71,31 @@ export function AgentDashboardContent() {
   useEffect(() => {
     loadDashboard();
   }, [loadDashboard]);
+
+  // Real-time listener for assignments so revoking / reassigning updates immediately
+  useEffect(() => {
+    if (!profile?.uid) return;
+
+    const q = query(collection(db, "assignments"), where("agentId", "==", profile.uid));
+    const unsubscribe = onSnapshot(
+      q,
+      (snap) => {
+        const updated = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<ExamAssignment, "id">),
+        }));
+        setAssignments(updated.sort((a, b) => (b.assignedAt || 0) - (a.assignedAt || 0)));
+
+        // Invalidate and refresh assigned exams list
+        fetchAssignedExams(profile.uid).then(setExams).catch(() => {});
+      },
+      (err) => {
+        console.warn("[AgentDashboard] Assignments realtime listener error:", err);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [profile?.uid]);
 
   if (loading) {
     return (
@@ -219,9 +243,26 @@ export function AgentDashboardContent() {
   const reassignedExamIds = new Set(reassignedAssignments.map((a) => a.examId));
 
   const assignedNotStarted = exams.filter((exam) => {
+    // If agent is not in assignedAgentIds, do not show
+    if (Array.isArray(exam.assignedAgentIds) && !exam.assignedAgentIds.includes(profile?.uid ?? "")) {
+      return false;
+    }
+
     // If there is an active reassignment for this exam, it is presented in the Reassigned section
     if (reassignedExamIds.has(exam.id)) {
       return false;
+    }
+
+    // Check if there is an explicit revoked assignment for this exam and no active assignment
+    const examAssignments = assignments.filter((a) => a.examId === exam.id);
+    const hasRevoked = examAssignments.some((a) => a.status === "revoked");
+    const hasActive = examAssignments.some((a) => a.status === "assigned" || a.status === "in_progress");
+    if (hasRevoked && !hasActive && !exam.reattemptPermissions?.[profile?.uid ?? ""]) {
+      // If agent has never had a completed attempt, hide it completely
+      const agentAttempts = attempts.filter((a) => a.examId === exam.id);
+      if (agentAttempts.every((a) => a.status !== "reviewed")) {
+        return false;
+      }
     }
 
     const examAttempts = attempts.filter(

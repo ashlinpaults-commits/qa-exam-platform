@@ -17,6 +17,7 @@ import type {
   ExamAttempt,
   AttemptAnswer,
   Exam,
+  ExamAssignment,
   KnowledgeGapCategory,
   Question,
   ExamMasterScorecard,
@@ -202,14 +203,29 @@ export async function startAttempt(
   agentId: string,
   assignmentId?: string
 ): Promise<string> {
-  /*
-   * First load the agent's existing attempts for this exam.
-   */
   console.debug(`[startAttempt] examId=${exam.id} agentId=${agentId} assignmentId=${assignmentId || "none"}`);
 
-  let activeAssignment = null;
+  /*
+   * 1. VALIDATE ASSIGNMENT & PERMISSIONS
+   */
+  let activeAssignment: ExamAssignment | null = null;
   if (assignmentId) {
     activeAssignment = await getAssignment(assignmentId);
+    if (!activeAssignment) {
+      throw new Error("This assignment could not be found.");
+    }
+    if (activeAssignment.agentId !== agentId) {
+      throw new Error("You are not authorized to start this assignment.");
+    }
+    if (activeAssignment.status === "revoked") {
+      throw new Error("This assignment has been revoked by an auditor and is no longer available.");
+    }
+  } else {
+    // When starting without explicit assignmentId, verify agent is in exam.assignedAgentIds
+    const isAssigned = Array.isArray(exam.assignedAgentIds) && exam.assignedAgentIds.includes(agentId);
+    if (!isAssigned) {
+      throw new Error("You are not assigned to this exam.");
+    }
   }
 
   const prior = await fetchAttemptsForAgent(
@@ -225,11 +241,16 @@ export async function startAttempt(
 
   if (activeAssignment?.attemptId) {
     const matched = prior.find(
-      (a) => a.id === activeAssignment!.attemptId && a.status === "in_progress"
+      (a) => a.id === activeAssignment!.attemptId
     );
     if (matched) {
-      console.debug(`[startAttempt] Resuming assigned attemptId=${matched.id}`);
-      return matched.id;
+      if (matched.status === "revoked") {
+        throw new Error("This attempt was revoked by an auditor and cannot be continued.");
+      }
+      if (matched.status === "in_progress") {
+        console.debug(`[startAttempt] Resuming assigned attemptId=${matched.id}`);
+        return matched.id;
+      }
     }
   }
 
@@ -282,7 +303,7 @@ export async function startAttempt(
   const latestReviewed = sortedPrior.find((attempt) => attempt.status === "reviewed");
 
   const hasActiveReattemptPermission = Boolean(
-    activeAssignment ||
+    (activeAssignment && activeAssignment.status !== "revoked") ||
     (permission &&
       (!latestAttempt || permission.grantedAt > latestAttempt.startedAt))
   );
@@ -291,9 +312,6 @@ export async function startAttempt(
    * -------------------------------------------------------
    * NORMAL EXAM
    * -------------------------------------------------------
-   *
-   * Normal exams cannot be repeated after review unless an auditor
-   * explicitly granted reattempt authorization.
    */
 
   if (
@@ -317,10 +335,6 @@ export async function startAttempt(
    */
 
   if (exam.mode === "until_perfect") {
-    /*
-     * If the latest reviewed attempt is perfect,
-     * the exam is finished unless auditor explicitly reassigned.
-     */
     if (
       latestReviewed &&
       latestReviewed.maxTotalMarks &&
@@ -338,17 +352,18 @@ export async function startAttempt(
    * -------------------------------------------------------
    * DETERMINE NEXT ATTEMPT NUMBER
    * -------------------------------------------------------
+   * Prioritize persisted attemptNumber on the assignment if valid,
+   * otherwise compute deterministically from prior attempts max.
    */
 
-  const attemptNumber =
-    prior.length > 0
-      ? Math.max(
-          ...prior.map(
-            (attempt) =>
-              attempt.attemptNumber
-          )
-        ) + 1
-      : 1;
+  const highestPriorNum = prior.length > 0
+    ? Math.max(...prior.map((a) => a.attemptNumber || 0))
+    : 0;
+
+  let attemptNumber = highestPriorNum + 1;
+  if (activeAssignment?.attemptNumber && activeAssignment.attemptNumber > highestPriorNum) {
+    attemptNumber = activeAssignment.attemptNumber;
+  }
 
   /*
    * -------------------------------------------------------

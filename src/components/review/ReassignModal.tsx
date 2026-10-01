@@ -66,6 +66,8 @@ export function ReassignModal({
 
       const customIds = mode === "custom" ? Array.from(customQuestionIds) : undefined;
 
+      const targetAttemptNumber = sourceAttempt.attemptNumber ? sourceAttempt.attemptNumber + 1 : 2;
+
       const assignment = await reassignExamFromAttempt({
         exam,
         agentId: sourceAttempt.agentId,
@@ -73,6 +75,7 @@ export function ReassignModal({
         mode,
         customQuestionIds: customIds,
         assignedBy: auditorId,
+        targetAttemptNumber,
       });
 
       onSuccess(assignment);

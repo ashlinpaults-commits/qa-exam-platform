@@ -291,8 +291,23 @@ export function TakeExam({ examId }: { examId: string }) {
   if (loading || !exam || questions.length === 0) {
     if (error) {
       return (
-        <div className="mx-auto max-w-2xl rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-          {error}
+        <div className="mx-auto mt-8 max-w-md rounded-2xl border border-red-200 bg-white p-6 shadow-sm dark:border-red-900/50 dark:bg-slate-900 text-center">
+          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400">
+            <AlertTriangle className="h-6 w-6" />
+          </div>
+          <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+            Exam Not Accessible
+          </h2>
+          <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+            {error}
+          </p>
+          <button
+            type="button"
+            onClick={() => router.push("/agent/dashboard")}
+            className="btn-primary mt-5 w-full"
+          >
+            Return to Dashboard
+          </button>
         </div>
       );
     }

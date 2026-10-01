@@ -9,13 +9,15 @@ import {
   saveAllReviewDraftScores,
   computeMergedScorecard,
   computeExamMasterScorecard,
+  normalizeAgentAnswers,
 } from "@/lib/attempts";
 import { getQuestionsByIds } from "@/lib/questions";
 import { fetchAllUsers } from "@/lib/users";
+import { fetchAssignmentsForExam, revokeAssignment } from "@/lib/assignments";
 import { saveAiReviewToAttempt } from "@/lib/aiReview";
 import { useAuth } from "@/context/AuthContext";
 import { auth, db } from "@/lib/firebase";
-import { doc, onSnapshot } from "firebase/firestore";
+import { doc, collection, query, where, onSnapshot } from "firebase/firestore";
 import type {
   Exam,
   ExamAttempt,
@@ -42,6 +44,7 @@ import {
   AlertCircle,
   Loader2,
   Check,
+  XCircle,
 } from "lucide-react";
 import { AmendScorecardModal } from "./AmendScorecardModal";
 import { ReassignModal } from "./ReassignModal";
@@ -60,6 +63,20 @@ const KNOWLEDGE_GAPS: KnowledgeGapCategory[] = [
   "Other",
 ];
 
+interface ReviewListItem {
+  key: string;
+  isPendingReassignment: boolean;
+  attempt?: ExamAttempt;
+  assignment?: ExamAssignment;
+  agentId: string;
+  attemptNumber: number;
+  status: ExamAttempt["status"] | "assigned";
+  timestamp: number;
+  timeTakenSeconds?: number;
+  isReattempt: boolean;
+  reattemptSource?: string;
+}
+
 export function ReviewScreen() {
   const { profile } = useAuth();
   const params = useParams();
@@ -69,6 +86,7 @@ export function ReviewScreen() {
   const [users, setUsers] = useState<AppUser[]>([]);
   const [selectedExam, setSelectedExam] = useState(routeExamId);
   const [attempts, setAttempts] = useState<ExamAttempt[]>([]);
+  const [assignments, setAssignments] = useState<ExamAssignment[]>([]);
   const [questionCache, setQuestionCache] = useState<Record<string, Question>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -111,20 +129,53 @@ export function ReviewScreen() {
   useEffect(() => {
     if (!selectedExam) {
       setAttempts([]);
+      setAssignments([]);
       return;
     }
 
     loadAttempts(selectedExam);
+
+    // Real-time listener for attempts
+    const qAttempts = query(collection(db, "attempts"), where("examId", "==", selectedExam));
+    const unsubAttempts = onSnapshot(
+      qAttempts,
+      (snap) => {
+        const list = snap.docs.map((d) => normalizeAgentAnswers({ id: d.id, ...d.data() } as ExamAttempt));
+        setAttempts(list.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0)));
+      },
+      (err) => console.warn("[ReviewScreen] Attempts realtime error:", err)
+    );
+
+    // Real-time listener for assignments
+    const qAssignments = query(collection(db, "assignments"), where("examId", "==", selectedExam));
+    const unsubAssignments = onSnapshot(
+      qAssignments,
+      (snap) => {
+        const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<ExamAssignment, "id">) }));
+        setAssignments(list.sort((a, b) => (b.assignedAt || 0) - (a.assignedAt || 0)));
+      },
+      (err) => console.warn("[ReviewScreen] Assignments realtime error:", err)
+    );
+
+    return () => {
+      unsubAttempts();
+      unsubAssignments();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedExam]);
 
   async function loadAttempts(examId: string) {
-    const list = await fetchAttemptsForExam(examId);
-    setAttempts(list);
+    const [attemptList, assignmentList] = await Promise.all([
+      fetchAttemptsForExam(examId),
+      fetchAssignmentsForExam(examId),
+    ]);
+    setAttempts(attemptList);
+    setAssignments(assignmentList);
 
-    const ids = new Set(
-      list.flatMap((a) => a.answers.map((ans) => ans.questionId))
-    );
+    const ids = new Set([
+      ...attemptList.flatMap((a) => a.answers.map((ans) => ans.questionId)),
+      ...assignmentList.flatMap((asg) => asg.questionIds || []),
+    ]);
 
     const missing = Array.from(ids).filter((id) => !questionCache[id]);
 
@@ -143,6 +194,68 @@ export function ReviewScreen() {
   function patchAttempt(updated: ExamAttempt) {
     setAttempts((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
   }
+
+  // Unified items list merging real attempts and pending reassignments
+  const unifiedItems: ReviewListItem[] = useMemo(() => {
+    const items: ReviewListItem[] = [];
+
+    // Real attempts (exclude terminated/revoked attempts)
+    for (const attempt of attempts) {
+      if (attempt.status === "revoked") continue;
+      items.push({
+        key: `attempt_${attempt.id}`,
+        isPendingReassignment: false,
+        attempt,
+        agentId: attempt.agentId,
+        attemptNumber: attempt.attemptNumber,
+        status: attempt.status,
+        timestamp: attempt.startedAt || 0,
+        timeTakenSeconds: attempt.timeTakenSeconds,
+        isReattempt: Boolean(attempt.isReattempt),
+        reattemptSource: attempt.reattemptSource,
+      });
+    }
+
+    // Pending reassignments / assignments (assigned status, not yet converted to in_progress attempt)
+    const activeAttemptAssignmentIds = new Set(
+      attempts
+        .filter((a) => a.status === "in_progress" || a.status === "submitted" || a.status === "review_in_progress")
+        .map((a) => a.assignmentId)
+        .filter(Boolean)
+    );
+
+    const pendingAssignments = assignments.filter(
+      (a) => a.status === "assigned" && !activeAttemptAssignmentIds.has(a.id)
+    );
+
+    for (const assignment of pendingAssignments) {
+      const agentAttempts = attempts.filter((a) => a.agentId === assignment.agentId);
+      const nextAttemptNumber =
+        assignment.attemptNumber ||
+        (agentAttempts.length > 0 ? Math.max(...agentAttempts.map((a) => a.attemptNumber || 0)) + 1 : 1);
+
+      const modeLabel =
+        assignment.reassignmentMode === "wrong_only"
+          ? "Wrong Answers Only"
+          : assignment.reassignmentMode === "custom"
+          ? "Custom Selection"
+          : "All Questions";
+
+      items.push({
+        key: `assignment_${assignment.id}`,
+        isPendingReassignment: true,
+        assignment,
+        agentId: assignment.agentId,
+        attemptNumber: nextAttemptNumber,
+        status: "assigned",
+        timestamp: assignment.assignedAt || Date.now(),
+        isReattempt: assignment.assignmentType === "reassigned",
+        reattemptSource: modeLabel,
+      });
+    }
+
+    return items.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  }, [attempts, assignments]);
 
   function userName(uid: string) {
     return users.find((u) => u.uid === uid)?.name ?? uid.slice(0, 8);
@@ -212,14 +325,118 @@ export function ReviewScreen() {
           title="No exam selected"
           subtitle="Select an exam from the dropdown above to view submitted attempts."
         />
-      ) : attempts.length === 0 ? (
+      ) : unifiedItems.length === 0 ? (
         <EmptyState
-          title="No attempts found"
-          subtitle="There are no attempts submitted for this exam yet."
+          title="No attempts or assignments found"
+          subtitle="There are no attempts or active reassignments for this exam yet."
         />
       ) : (
         <div className="space-y-4">
-          {attempts.map((attempt) => {
+          {unifiedItems.map((item) => {
+            // PENDING REASSIGNMENT CARD
+            if (item.isPendingReassignment && item.assignment) {
+              const asg = item.assignment;
+              const isExpanded = expanded === item.key;
+
+              return (
+                <div
+                  key={item.key}
+                  className="overflow-hidden rounded-xl border border-indigo-200 bg-white shadow-sm dark:border-indigo-900/60 dark:bg-slate-900 border-l-4 border-l-indigo-500"
+                >
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-slate-50/70 dark:hover:bg-slate-800/50"
+                    onClick={() => setExpanded(isExpanded ? null : item.key)}
+                  >
+                    <div className="flex min-w-0 items-center gap-3">
+                      {isExpanded ? (
+                        <ChevronDown className="h-4 w-4 shrink-0 text-indigo-600" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 shrink-0 text-indigo-600" />
+                      )}
+
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="font-semibold text-slate-900 dark:text-slate-100">
+                            {userName(item.agentId)} · Attempt #{item.attemptNumber}
+                          </p>
+                          <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+                            Reattempt · {item.reattemptSource || "Reassigned"}
+                          </span>
+                        </div>
+
+                        <p className="text-xs text-slate-500">
+                          Reassigned on {new Date(item.timestamp).toLocaleString()} · {asg.questionIds.length} {asg.questionIds.length === 1 ? "question" : "questions"}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Badge color="indigo">Reassigned · Awaiting Agent</Badge>
+                      <button
+                        type="button"
+                        className="flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2 py-1 text-[11px] font-semibold text-red-600 shadow-sm hover:bg-red-50 dark:border-red-800 dark:bg-slate-800 dark:text-red-400 dark:hover:bg-red-950/40"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          if (!confirm(`Revoke reassignment for ${userName(item.agentId)}? The exam will immediately disappear from the agent's dashboard.`)) return;
+                          try {
+                            await revokeAssignment({
+                              examId: selectedExam,
+                              agentId: item.agentId,
+                              assignmentId: asg.id,
+                              revokedBy: profile?.uid || "auditor",
+                            });
+                            setAssignments((prev) => prev.filter((a) => a.id !== asg.id));
+                            setMessage({
+                              type: "success",
+                              text: `Assignment revoked successfully for ${userName(item.agentId)}.`,
+                            });
+                          } catch (err: any) {
+                            setMessage({
+                              type: "error",
+                              text: err.message || "Failed to revoke assignment.",
+                            });
+                          }
+                        }}
+                        title="Revoke this reassignment"
+                      >
+                        <XCircle className="h-3 w-3" />
+                        Revoke
+                      </button>
+                    </div>
+                  </button>
+
+                  {isExpanded && (
+                    <div className="border-t border-slate-100 p-4 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/20 space-y-3">
+                      <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
+                        <span>Scope: <strong className="text-slate-800 dark:text-slate-200">{item.reattemptSource}</strong> ({asg.questionIds.length} questions)</span>
+                        <span className="text-slate-400">Agent notified · Attempt begins when started</span>
+                      </div>
+
+                      <div className="space-y-2">
+                        {asg.questionIds.map((qId, idx) => {
+                          const q = questionCache[qId] || selectedExamDoc?.questionSnapshots?.[qId];
+                          return (
+                            <div key={qId} className="rounded-lg border border-slate-200 bg-white p-3 text-xs dark:border-slate-700 dark:bg-slate-800">
+                              <div className="flex items-center justify-between text-slate-500 mb-1">
+                                <span className="font-mono font-bold">Question #{idx + 1}</span>
+                                <span className="capitalize">{q?.type?.replace("_", " ") || "Question"}</span>
+                              </div>
+                              <p className="text-slate-800 dark:text-slate-200 font-medium">
+                                {q?.questionText || `Question ID: ${qId}`}
+                              </p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
+            // REAL ATTEMPT CARD
+            const attempt = item.attempt!;
             const isReviewed = attempt.status === "reviewed";
 
             return (
@@ -374,12 +591,17 @@ export function ReviewScreen() {
           auditorId={profile?.uid ?? "auditor"}
           questionsMap={questionCache}
           onSuccess={(assignment: ExamAssignment) => {
+            const nextAttemptNum = assignment.attemptNumber || (reassigningAttempt.attemptNumber ? reassigningAttempt.attemptNumber + 1 : 2);
             setMessage({
               type: "success",
               text: `Exam reassigned successfully to ${userName(
                 reassigningAttempt.agentId
-              )} (${assignment.questionCount} questions). New actionable assignment created.`,
+              )} (${assignment.questionCount} questions). Next attempt: #${nextAttemptNum} (Awaiting Agent).`,
             });
+            // Optimistically insert pending assignment so Review Attempts displays Attempt #2 immediately
+            setAssignments((prev) => [assignment, ...prev.filter((a) => a.id !== assignment.id)]);
+            setReassigningAttempt(null);
+
             // Update reattempt permissions in local state
             if (selectedExamDoc) {
               const updatedPermissions = {
@@ -1458,6 +1680,8 @@ function formatStatus(status: ExamAttempt["status"]) {
       return "Review In Progress";
     case "reviewed":
       return "Reviewed";
+    case "revoked":
+      return "Revoked";
     default:
       return status;
   }

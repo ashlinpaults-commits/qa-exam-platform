@@ -8,7 +8,7 @@ export function Badge({
   color = "slate",
 }: {
   children: ReactNode;
-  color?: "slate" | "brand" | "green" | "amber" | "red";
+  color?: "slate" | "brand" | "green" | "amber" | "red" | "indigo";
 }) {
   const colors: Record<string, string> = {
     slate: "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300",
@@ -16,6 +16,7 @@ export function Badge({
     green: "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
     amber: "bg-amber-50 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
     red: "bg-rose-50 text-rose-700 border border-rose-200/70 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-900/50",
+    indigo: "bg-indigo-50 text-indigo-700 border border-indigo-200/70 dark:bg-indigo-950/40 dark:text-indigo-300 dark:border-indigo-900/50",
   };
   return (
     <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${colors[color]}`}>

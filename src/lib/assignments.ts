@@ -52,6 +52,7 @@ export async function createAssignment(params: {
   questionIds: string[];
   assignedBy: string;
   dueAt?: number;
+  attemptNumber?: number;
 }): Promise<ExamAssignment> {
   const {
     exam,
@@ -62,6 +63,7 @@ export async function createAssignment(params: {
     questionIds,
     assignedBy,
     dueAt,
+    attemptNumber,
   } = params;
 
   if (!questionIds || questionIds.length === 0) {
@@ -69,26 +71,31 @@ export async function createAssignment(params: {
   }
 
   const modeKey = reassignmentMode || "all";
-  const assignmentId = generateAssignmentId(exam.id, agentId, modeKey, sourceAttemptId);
-  const assignmentRef = doc(db, COL, assignmentId);
+  const baseAssignmentId = generateAssignmentId(exam.id, agentId, modeKey, sourceAttemptId);
+  let targetAssignmentId = baseAssignmentId;
 
   let resultAssignment: ExamAssignment | null = null;
 
   await runTransaction(db, async (transaction) => {
-    const existingSnap = await transaction.get(assignmentRef);
+    const existingSnap = await transaction.get(doc(db, COL, baseAssignmentId));
 
     if (existingSnap.exists()) {
       const existingData = existingSnap.data() as ExamAssignment;
-      // If assignment is still active/actionable, reuse it (idempotent result)
+      // If assignment is still active/actionable, reuse it (idempotent result for double clicks)
       if (existingData.status === "assigned" || existingData.status === "in_progress") {
-        console.debug(`[createAssignment] Reusing existing active assignment ${assignmentId}`);
+        console.debug(`[createAssignment] Reusing existing active assignment ${baseAssignmentId}`);
         resultAssignment = { ...existingData, id: existingSnap.id };
         return;
       }
+      // If previously revoked or submitted, generate a unique sequential ID to preserve history
+      if (existingData.status === "revoked" || existingData.status === "submitted" || existingData.status === "reviewed") {
+        targetAssignmentId = `${baseAssignmentId}_${Date.now()}`;
+      }
     }
 
+    const assignmentRef = doc(db, COL, targetAssignmentId);
     const payload: ExamAssignment = stripUndefined({
-      id: assignmentId,
+      id: targetAssignmentId,
       examId: exam.id,
       agentId,
       sourceAttemptId,
@@ -99,6 +106,7 @@ export async function createAssignment(params: {
       assignedAt: Date.now(),
       assignedBy,
       dueAt,
+      attemptNumber,
       examName: exam.name || "Exam",
       module: exam.module,
       batch: exam.batch,
@@ -178,6 +186,16 @@ export async function fetchAssignmentsForAgent(
 }
 
 /**
+ * Fetches currently active assignments for an agent (assigned or in_progress, excluding revoked).
+ */
+export async function fetchActiveAssignmentsForAgent(
+  agentId: string
+): Promise<ExamAssignment[]> {
+  const all = await fetchAssignmentsForAgent(agentId);
+  return all.filter((a) => a.status === "assigned" || a.status === "in_progress");
+}
+
+/**
  * Fetches all assignments for an exam.
  */
 export async function fetchAssignmentsForExam(
@@ -203,6 +221,16 @@ export async function fetchAssignmentsForExam(
   }));
 
   return list.sort((a, b) => (b.assignedAt || 0) - (a.assignedAt || 0));
+}
+
+/**
+ * Fetches currently active assignments for an exam (assigned or in_progress).
+ */
+export async function fetchActiveAssignmentsForExam(
+  examId: string
+): Promise<ExamAssignment[]> {
+  const all = await fetchAssignmentsForExam(examId);
+  return all.filter((a) => a.status === "assigned" || a.status === "in_progress");
 }
 
 /**
@@ -232,6 +260,159 @@ export async function updateAssignmentStatus(
 }
 
 /**
+ * Revokes an assignment with authoritative state persistence and access termination.
+ * 
+ * Guarantees:
+ * 1. Preserves completed historical attempts, scores, and master progress.
+ * 2. If assignment is unstarted: marks assignment revoked and removes agent from exam.assignedAgentIds (if no attempts).
+ * 3. If assignment has an in-progress attempt: terminates attempt with status "revoked" and prevents agent from continuing.
+ * 4. Clears reattempt permissions on the exam.
+ * 5. Idempotent: repeated calls safely succeed with no corruption.
+ */
+export async function revokeAssignment(params: {
+  examId: string;
+  agentId: string;
+  assignmentId?: string;
+  revokedBy: string;
+  reason?: string;
+}): Promise<{ revokedAssignmentId: string; attemptTerminated: boolean }> {
+  const { examId, agentId, assignmentId, revokedBy, reason } = params;
+  const now = Date.now();
+  const revocationReason = reason?.trim() || "Assignment revoked by auditor";
+
+  let targetAssignment: ExamAssignment | null = null;
+
+  // 1. Locate specific assignment or active assignment for agent + exam
+  if (assignmentId) {
+    targetAssignment = await getAssignment(assignmentId);
+  }
+
+  if (!targetAssignment) {
+    const activeList = await fetchActiveAssignmentsForAgent(agentId);
+    targetAssignment = activeList.find((a) => a.examId === examId) || null;
+  }
+
+  let attemptTerminated = false;
+  let revokedAssignmentId = targetAssignment?.id || "";
+
+  // 2. Mark assignment document as revoked inside transaction
+  if (targetAssignment) {
+    revokedAssignmentId = targetAssignment.id;
+    const assignmentRef = doc(db, COL, targetAssignment.id);
+
+    await runTransaction(db, async (transaction) => {
+      const snap = await transaction.get(assignmentRef);
+      if (!snap.exists()) return;
+      const current = snap.data() as ExamAssignment;
+      if (current.status === "revoked") {
+        // Idempotent: already revoked
+        return;
+      }
+
+      transaction.update(
+        assignmentRef,
+        stripUndefined({
+          status: "revoked",
+          revokedAt: now,
+          revokedBy,
+          revocationReason,
+        })
+      );
+    });
+
+    // If an attempt was started from this assignment and is currently in_progress, terminate it
+    if (targetAssignment.attemptId) {
+      const attemptRef = doc(db, "attempts", targetAssignment.attemptId);
+      try {
+        await runTransaction(db, async (transaction) => {
+          const aSnap = await transaction.get(attemptRef);
+          if (aSnap.exists()) {
+            const aData = aSnap.data() as ExamAttempt;
+            if (aData.status === "in_progress") {
+              transaction.update(attemptRef, { status: "revoked" });
+              attemptTerminated = true;
+            }
+          }
+        });
+      } catch (err) {
+        console.warn("[revokeAssignment] Could not update linked attempt status:", err);
+      }
+    }
+  } else {
+    // If no explicit assignments document existed (e.g. legacy standard assignment), persist a revoked record
+    revokedAssignmentId = `${examId}_${agentId}_revoked_${now}`;
+    const syntheticRef = doc(db, COL, revokedAssignmentId);
+    await runTransaction(db, async (transaction) => {
+      transaction.set(
+        syntheticRef,
+        stripUndefined({
+          id: revokedAssignmentId,
+          examId,
+          agentId,
+          assignmentType: "original",
+          questionIds: [],
+          status: "revoked",
+          assignedAt: now,
+          revokedAt: now,
+          revokedBy,
+          revocationReason,
+        })
+      );
+    });
+  }
+
+  // 3. Check for any in-progress attempt for this agent & exam in the attempts collection
+  try {
+    const qAttempts = query(
+      collection(db, "attempts"),
+      where("examId", "==", examId),
+      where("agentId", "==", agentId),
+      where("status", "==", "in_progress")
+    );
+    const inProgressSnaps = await getDocs(qAttempts);
+    for (const d of inProgressSnaps.docs) {
+      await updateDoc(doc(db, "attempts", d.id), { status: "revoked" });
+      attemptTerminated = true;
+    }
+  } catch (err) {
+    console.warn("[revokeAssignment] Query for in-progress attempts failed:", err);
+  }
+
+  // 4. Update the exam: remove reattempt permissions and check completed attempts
+  try {
+    const examSnap = await getDoc(doc(db, "exams", examId));
+    if (examSnap.exists()) {
+      const examData = examSnap.data() as Exam;
+      const reattemptPermissions = { ...(examData.reattemptPermissions || {}) };
+      delete reattemptPermissions[agentId];
+
+      // Check if the agent has any completed (reviewed) historical attempts
+      const qCompleted = query(
+        collection(db, "attempts"),
+        where("examId", "==", examId),
+        where("agentId", "==", agentId),
+        where("status", "==", "reviewed")
+      );
+      const completedSnaps = await getDocs(qCompleted);
+      const hasCompletedAttempts = !completedSnaps.empty;
+
+      const patch: Partial<Exam> = { reattemptPermissions };
+
+      // If no completed attempts exist, safely remove agent from assignedAgentIds
+      if (!hasCompletedAttempts && Array.isArray(examData.assignedAgentIds)) {
+        patch.assignedAgentIds = examData.assignedAgentIds.filter((id) => id !== agentId);
+      }
+
+      await updateExam(examId, patch);
+    }
+  } catch (err) {
+    console.warn("[revokeAssignment] Failed to update exam metadata:", err);
+  }
+
+  return { revokedAssignmentId, attemptTerminated };
+}
+
+/**
  * Helper to reassign an exam based on a completed attempt.
  * Validates question sets and prevents empty assignments.
  */
@@ -242,8 +423,9 @@ export async function reassignExamFromAttempt(params: {
   mode: ReassignmentMode;
   customQuestionIds?: string[];
   assignedBy: string;
+  targetAttemptNumber?: number;
 }): Promise<ExamAssignment> {
-  const { exam, agentId, sourceAttempt, mode, customQuestionIds, assignedBy } = params;
+  const { exam, agentId, sourceAttempt, mode, customQuestionIds, assignedBy, targetAttemptNumber } = params;
 
   let targetQuestionIds: string[] = [];
 
@@ -270,6 +452,8 @@ export async function reassignExamFromAttempt(params: {
     targetQuestionIds = customQuestionIds;
   }
 
+  const nextAttemptNumber = targetAttemptNumber || (sourceAttempt.attemptNumber ? sourceAttempt.attemptNumber + 1 : 2);
+
   return createAssignment({
     exam,
     agentId,
@@ -278,5 +462,6 @@ export async function reassignExamFromAttempt(params: {
     reassignmentMode: mode,
     questionIds: targetQuestionIds,
     assignedBy,
+    attemptNumber: nextAttemptNumber,
   });
 }
