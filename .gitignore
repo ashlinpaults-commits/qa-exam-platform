@@ -6,3 +6,4 @@ scripts/serviceAccountKey.json
 
 .vercel
 .env*
+*.tsbuildinfo

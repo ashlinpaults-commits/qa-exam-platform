@@ -354,7 +354,7 @@ export interface AttemptAiReview {
 
 export type AssignmentType = "original" | "reassigned";
 export type ReassignmentMode = "all" | "wrong_only" | "custom";
-export type AssignmentStatus = "assigned" | "in_progress" | "submitted" | "reviewed" | "revoked";
+export type AssignmentStatus = "assigned" | "in_progress" | "submitted" | "reviewed" | "revoked" | "cancelled";
 
 export interface ExamAssignment {
   id: string;
@@ -379,6 +379,11 @@ export interface ExamAssignment {
   revokedAt?: number;
   revokedBy?: string;
   revocationReason?: string;
+
+  // Cancellation metadata
+  cancelledAt?: number;
+  cancelledBy?: string;
+  cancellationReason?: string;
 }
 
 /* =========================================================

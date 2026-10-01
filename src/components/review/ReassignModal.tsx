@@ -14,6 +14,7 @@ interface ReassignModalProps {
   agentName?: string;
   auditorId: string;
   questionsMap?: Record<string, Question>;
+  allAttempts?: ExamAttempt[];
   onSuccess: (assignment: ExamAssignment) => void;
 }
 
@@ -25,6 +26,7 @@ export function ReassignModal({
   agentName,
   auditorId,
   questionsMap = {},
+  allAttempts = [],
   onSuccess,
 }: ReassignModalProps) {
   const [mode, setMode] = useState<ReassignmentMode>("all");
@@ -66,7 +68,12 @@ export function ReassignModal({
 
       const customIds = mode === "custom" ? Array.from(customQuestionIds) : undefined;
 
-      const targetAttemptNumber = sourceAttempt.attemptNumber ? sourceAttempt.attemptNumber + 1 : 2;
+      const agentAttempts = (allAttempts || []).filter((a) => a.agentId === sourceAttempt.agentId);
+      const highestAttemptNum = Math.max(
+        sourceAttempt.attemptNumber || 0,
+        ...agentAttempts.map((a) => a.attemptNumber || 0)
+      );
+      const targetAttemptNumber = highestAttemptNum + 1;
 
       const assignment = await reassignExamFromAttempt({
         exam,

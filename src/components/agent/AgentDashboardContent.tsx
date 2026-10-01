@@ -232,9 +232,22 @@ export function AgentDashboardContent() {
    * -------------------------------------------------------
    */
 
-  const actionableAssignments = assignments.filter(
-    (a) => a.status === "assigned" || a.status === "in_progress"
-  );
+  const actionableAssignments = assignments.filter((a) => {
+    if (a.status !== "assigned" && a.status !== "in_progress") return false;
+
+    // Reconciliation: If an attempt for this assignment is already submitted or reviewed,
+    // this assignment has been completed and is no longer actionable.
+    const isFulfilled = attempts.some(
+      (att) =>
+        att.examId === a.examId &&
+        (att.status === "submitted" || att.status === "reviewed" || att.status === "review_in_progress") &&
+        (att.assignmentId === a.id ||
+          (a.attemptNumber && att.attemptNumber === a.attemptNumber) ||
+          (att.startedAt && a.assignedAt && att.startedAt >= a.assignedAt - 60000 && att.attemptNumber && att.attemptNumber >= (a.attemptNumber || 2)))
+    );
+
+    return !isFulfilled;
+  });
 
   const reassignedAssignments = actionableAssignments.filter(
     (a) => a.assignmentType === "reassigned"

@@ -87,8 +87,8 @@ export async function createAssignment(params: {
         resultAssignment = { ...existingData, id: existingSnap.id };
         return;
       }
-      // If previously revoked or submitted, generate a unique sequential ID to preserve history
-      if (existingData.status === "revoked" || existingData.status === "submitted" || existingData.status === "reviewed") {
+      // If previously revoked, cancelled, or submitted, generate a unique sequential ID to preserve history
+      if (existingData.status === "revoked" || existingData.status === "cancelled" || existingData.status === "submitted" || existingData.status === "reviewed") {
         targetAssignmentId = `${baseAssignmentId}_${Date.now()}`;
       }
     }
@@ -452,7 +452,24 @@ export async function reassignExamFromAttempt(params: {
     targetQuestionIds = customQuestionIds;
   }
 
-  const nextAttemptNumber = targetAttemptNumber || (sourceAttempt.attemptNumber ? sourceAttempt.attemptNumber + 1 : 2);
+  let nextAttemptNumber = targetAttemptNumber;
+  if (!nextAttemptNumber) {
+    try {
+      const q = query(
+        collection(db, "attempts"),
+        where("examId", "==", exam.id),
+        where("agentId", "==", agentId)
+      );
+      const snap = await getDocs(q);
+      const existingNums = snap.docs
+        .map((d) => (d.data() as ExamAttempt).attemptNumber || 0)
+        .filter((n) => typeof n === "number" && !isNaN(n));
+      const highestExisting = Math.max(sourceAttempt.attemptNumber || 0, ...existingNums, 0);
+      nextAttemptNumber = highestExisting + 1;
+    } catch {
+      nextAttemptNumber = (sourceAttempt.attemptNumber || 1) + 1;
+    }
+  }
 
   return createAssignment({
     exam,
@@ -465,3 +482,94 @@ export async function reassignExamFromAttempt(params: {
     attemptNumber: nextAttemptNumber,
   });
 }
+
+/**
+ * Cancels an unstarted reassignment issued by an auditor.
+ * 
+ * Rules & Guarantees:
+ * 1. Only unstarted ("assigned") reassignments can be cancelled.
+ * 2. If the agent has already started (status === "in_progress"), cancellation is disallowed with a clear error message.
+ * 3. Never deletes historical completed attempts, scores, or master progress.
+ * 4. Authoritatively persists status: "cancelled", cancelledAt, cancelledBy, cancellationReason.
+ * 5. Clears reattempt permissions on the exam for this agent.
+ * 6. Idempotent: safe if called twice.
+ */
+export async function cancelReassignment(params: {
+  assignmentId: string;
+  cancelledBy: string;
+  cancellationReason?: string;
+}): Promise<{ cancelledAssignment: ExamAssignment }> {
+  const { assignmentId, cancelledBy, cancellationReason } = params;
+
+  const assignmentRef = doc(db, COL, assignmentId);
+  const snap = await getDoc(assignmentRef);
+  if (!snap.exists()) {
+    throw new Error("Reassignment record not found.");
+  }
+
+  const assignment = { id: snap.id, ...snap.data() } as ExamAssignment;
+
+  // Idempotency: if already cancelled, return successfully
+  if (assignment.status === "cancelled") {
+    return { cancelledAssignment: assignment };
+  }
+
+  // Eligibility Case C & D: submitted or reviewed attempts cannot be cancelled
+  if (assignment.status === "submitted" || assignment.status === "reviewed") {
+    throw new Error("This reassignment has already been submitted and cannot be cancelled.");
+  }
+
+  // Eligibility Case B: already started by agent
+  if (assignment.status === "in_progress") {
+    throw new Error("This reassignment has already been started and cannot be cancelled.");
+  }
+
+  // Also check linked attempt if attemptId exists
+  if (assignment.attemptId) {
+    try {
+      const attSnap = await getDoc(doc(db, "attempts", assignment.attemptId));
+      if (attSnap.exists()) {
+        const attData = attSnap.data() as ExamAttempt;
+        if (attData.status === "in_progress" || attData.status === "submitted" || attData.status === "reviewed") {
+          throw new Error("This reassignment has already been started and cannot be cancelled.");
+        }
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("started")) throw err;
+    }
+  }
+
+  const now = Date.now();
+  const patch: Partial<ExamAssignment> = stripUndefined({
+    status: "cancelled",
+    cancelledAt: now,
+    cancelledBy,
+    cancellationReason: cancellationReason?.trim() || "Cancelled by auditor",
+  });
+
+  await updateDoc(assignmentRef, patch);
+
+  // Clear reattempt permissions on the exam document
+  try {
+    const examSnap = await getDoc(doc(db, "exams", assignment.examId));
+    if (examSnap.exists()) {
+      const examData = examSnap.data() as Exam;
+      if (examData.reattemptPermissions?.[assignment.agentId]) {
+        const reattemptPermissions = { ...(examData.reattemptPermissions || {}) };
+        delete reattemptPermissions[assignment.agentId];
+        await updateExam(assignment.examId, { reattemptPermissions });
+      }
+    }
+  } catch (err) {
+    console.warn("[cancelReassignment] Failed to clear reattemptPermissions:", err);
+  }
+
+  const updatedAssignment: ExamAssignment = {
+    ...assignment,
+    ...patch,
+  };
+
+  return { cancelledAssignment: updatedAssignment };
+}
+
+

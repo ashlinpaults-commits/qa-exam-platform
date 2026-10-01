@@ -27,7 +27,7 @@ import type {
   QuestionAiReview,
 } from "@/types";
 import { stripUndefined, extractRawAnswerText } from "./questions";
-import { getAssignment, updateAssignmentStatus } from "./assignments";
+import { getAssignment, updateAssignmentStatus, fetchActiveAssignmentsForAgent } from "./assignments";
 
 const COL = "attempts";
 
@@ -220,11 +220,24 @@ export async function startAttempt(
     if (activeAssignment.status === "revoked") {
       throw new Error("This assignment has been revoked by an auditor and is no longer available.");
     }
+    if (activeAssignment.status === "cancelled") {
+      throw new Error("This reassignment was cancelled by an auditor and is no longer available.");
+    }
+    if (activeAssignment.status === "submitted" || activeAssignment.status === "reviewed") {
+      throw new Error("This exam assignment has already been completed and submitted.");
+    }
   } else {
     // When starting without explicit assignmentId, verify agent is in exam.assignedAgentIds
     const isAssigned = Array.isArray(exam.assignedAgentIds) && exam.assignedAgentIds.includes(agentId);
     if (!isAssigned) {
       throw new Error("You are not assigned to this exam.");
+    }
+    // Automatically locate and link any active assignment for this agent & exam
+    try {
+      const activeAssignments = await fetchActiveAssignmentsForAgent(agentId);
+      activeAssignment = activeAssignments.find((a) => a.examId === exam.id && a.status === "assigned") || null;
+    } catch {
+      // Non-fatal if query fails, proceed with standard assignment
     }
   }
 
@@ -250,6 +263,9 @@ export async function startAttempt(
       if (matched.status === "in_progress") {
         console.debug(`[startAttempt] Resuming assigned attemptId=${matched.id}`);
         return matched.id;
+      }
+      if (matched.status === "submitted" || matched.status === "reviewed") {
+        throw new Error("This exam assignment has already been completed and submitted.");
       }
     }
   }
@@ -303,7 +319,7 @@ export async function startAttempt(
   const latestReviewed = sortedPrior.find((attempt) => attempt.status === "reviewed");
 
   const hasActiveReattemptPermission = Boolean(
-    (activeAssignment && activeAssignment.status !== "revoked") ||
+    (activeAssignment && activeAssignment.status !== "revoked" && activeAssignment.status !== "cancelled") ||
     (permission &&
       (!latestAttempt || permission.grantedAt > latestAttempt.startedAt))
   );
@@ -467,7 +483,17 @@ export async function startAttempt(
        * Do NOT create another.
        */
       if (existing.exists()) {
-        console.debug(`[startAttempt] Found concurrently created attemptId=${attemptId}`);
+        const existingData = existing.data() as ExamAttempt;
+        if (existingData.status === "in_progress") {
+          console.debug(`[startAttempt] Found concurrently created active attemptId=${attemptId}`);
+          return;
+        }
+        if (existingData.status === "submitted" || existingData.status === "reviewed") {
+          throw new Error(`Attempt #${attemptNumber} has already been completed and submitted. It cannot be retaken.`);
+        }
+        if (existingData.status === "revoked") {
+          throw new Error(`Attempt #${attemptNumber} was revoked by an auditor and cannot be taken.`);
+        }
         return;
       }
 
@@ -596,6 +622,11 @@ export async function saveAllAnswers(
     const current = snap.data() as ExamAttempt;
     if (current.status !== "in_progress") {
       throw new Error("This attempt is no longer editable.");
+    }
+
+    // Cross-agent protection: verify current user matches agentId (Section 11)
+    if (auth.currentUser?.uid && current.agentId && auth.currentUser.uid !== current.agentId) {
+      throw new Error("Unauthorized: Cannot save answers for another agent's attempt.");
     }
 
     const serverAnswers = current.agentAnswers ?? {};
@@ -756,7 +787,18 @@ export async function submitAttempt(
     if (snap.exists()) {
       const data = snap.data() as ExamAttempt;
       if (data.assignmentId) {
-        await updateAssignmentStatus(data.assignmentId, "submitted");
+        await updateAssignmentStatus(data.assignmentId, "submitted", attemptId);
+      } else {
+        // Fallback: match any active assignment for this agent & exam
+        try {
+          const activeAsgs = await fetchActiveAssignmentsForAgent(data.agentId);
+          const match = activeAsgs.find((a) => a.examId === data.examId);
+          if (match) {
+            await updateAssignmentStatus(match.id, "submitted", attemptId);
+          }
+        } catch (asgErr) {
+          console.warn("[submitAttempt] Fallback active assignment update failed:", asgErr);
+        }
       }
       // Asynchronously trigger AI review with authenticated user token
       try {

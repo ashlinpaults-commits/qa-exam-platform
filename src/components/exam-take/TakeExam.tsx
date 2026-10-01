@@ -80,6 +80,10 @@ export function TakeExam({ examId }: { examId: string }) {
         setAttempt(a);
 
         if (a) {
+          if (a.status !== "in_progress") {
+            throw new Error(`This attempt is no longer active (Status: ${a.status}). Completed or submitted attempts cannot be retaken.`);
+          }
+
           console.debug("[TakeExam] Attempt loaded/started", {
             examId,
             attemptId: a.id,
@@ -94,6 +98,19 @@ export function TakeExam({ examId }: { examId: string }) {
             throw new Error("This exam is missing its safe question content. Ask an auditor to republish it.");
           }
           setQuestions(qs);
+
+          // Development-safe integrity assertion (Section 15)
+          const answerCount = Object.keys(a.agentAnswers || {}).length;
+          const isNewlyStarted = a.startedAt && Date.now() - a.startedAt < 15000;
+          if (isNewlyStarted && answerCount > 0) {
+            console.warn("[DATA INTEGRITY WARNING] Newly started attempt contains non-empty answers:", {
+              attemptId: a.id,
+              agentId: a.agentId,
+              examId: a.examId,
+              sourceAttemptId: a.parentAttemptId || "none",
+              answerCount,
+            });
+          }
 
           const initial: Record<string, string> = {};
           a.answers.forEach((ans) => {
@@ -123,7 +140,7 @@ export function TakeExam({ examId }: { examId: string }) {
 
   // Serialized atomic flush of all dirty answers
   const flushDirtyAnswers = useCallback(async (): Promise<boolean> => {
-    if (!attempt || dirtyKeysRef.current.size === 0) return true;
+    if (!attempt || attempt.status !== "in_progress" || dirtyKeysRef.current.size === 0) return true;
     if (saveInProgressRef.current) {
       flushRequestedRef.current = true;
       if (currentFlushPromiseRef.current) {
@@ -172,7 +189,7 @@ export function TakeExam({ examId }: { examId: string }) {
   // Clean up debounce timer on unmount and listen for page visibility / unload
   useEffect(() => {
     const handleBeforeUnload = () => {
-      if (dirtyKeysRef.current.size > 0 && attempt) {
+      if (dirtyKeysRef.current.size > 0 && attempt && attempt.status === "in_progress") {
         const toSave: Record<string, string> = {};
         dirtyKeysRef.current.forEach((qid) => {
           toSave[qid] = answersRef.current[qid] ?? "";
@@ -182,7 +199,7 @@ export function TakeExam({ examId }: { examId: string }) {
     };
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "hidden" && dirtyKeysRef.current.size > 0) {
+      if (document.visibilityState === "hidden" && dirtyKeysRef.current.size > 0 && attempt && attempt.status === "in_progress") {
         flushDirtyAnswers();
       }
     };

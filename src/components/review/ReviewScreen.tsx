@@ -13,7 +13,7 @@ import {
 } from "@/lib/attempts";
 import { getQuestionsByIds } from "@/lib/questions";
 import { fetchAllUsers } from "@/lib/users";
-import { fetchAssignmentsForExam, revokeAssignment } from "@/lib/assignments";
+import { fetchAssignmentsForExam, revokeAssignment, cancelReassignment } from "@/lib/assignments";
 import { saveAiReviewToAttempt } from "@/lib/aiReview";
 import { useAuth } from "@/context/AuthContext";
 import { auth, db } from "@/lib/firebase";
@@ -70,7 +70,7 @@ interface ReviewListItem {
   assignment?: ExamAssignment;
   agentId: string;
   attemptNumber: number;
-  status: ExamAttempt["status"] | "assigned";
+  status: ExamAttempt["status"] | "assigned" | "cancelled";
   timestamp: number;
   timeTakenSeconds?: number;
   isReattempt: boolean;
@@ -98,6 +98,9 @@ export function ReviewScreen() {
   // Reassignment & Amend Modals
   const [reassigningAttempt, setReassigningAttempt] = useState<ExamAttempt | null>(null);
   const [amendingAttempt, setAmendingAttempt] = useState<ExamAttempt | null>(null);
+  const [cancellingAssignment, setCancellingAssignment] = useState<ExamAssignment | null>(null);
+  const [cancelReason, setCancelReason] = useState("");
+  const [isCancelling, setIsCancelling] = useState(false);
   const [viewingMergedAgentId, setViewingMergedAgentId] = useState<string | null>(null);
 
   const selectedExamDoc = useMemo(
@@ -224,11 +227,25 @@ export function ReviewScreen() {
         .filter(Boolean)
     );
 
-    const pendingAssignments = assignments.filter(
-      (a) => a.status === "assigned" && !activeAttemptAssignmentIds.has(a.id)
-    );
+    const relevantAssignments = assignments.filter((a) => {
+      if (a.status !== "assigned" && a.status !== "cancelled") return false;
+      if (activeAttemptAssignmentIds.has(a.id)) return false;
 
-    for (const assignment of pendingAssignments) {
+      // Reconcile assignments where an attempt has already fulfilled it (e.g. legacy attempts missing assignmentId)
+      const isFulfilled = attempts.some(
+        (att) =>
+          att.agentId === a.agentId &&
+          att.status !== "revoked" &&
+          (att.assignmentId === a.id ||
+            (a.attemptNumber && att.attemptNumber === a.attemptNumber) ||
+            (att.startedAt && a.assignedAt && att.startedAt >= a.assignedAt - 60000 && att.attemptNumber && att.attemptNumber >= (a.attemptNumber || 2)))
+      );
+      if (isFulfilled) return false;
+
+      return true;
+    });
+
+    for (const assignment of relevantAssignments) {
       const agentAttempts = attempts.filter((a) => a.agentId === assignment.agentId);
       const nextAttemptNumber =
         assignment.attemptNumber ||
@@ -247,8 +264,8 @@ export function ReviewScreen() {
         assignment,
         agentId: assignment.agentId,
         attemptNumber: nextAttemptNumber,
-        status: "assigned",
-        timestamp: assignment.assignedAt || Date.now(),
+        status: assignment.status as "assigned" | "cancelled",
+        timestamp: (assignment.status === "cancelled" && assignment.cancelledAt) ? assignment.cancelledAt : (assignment.assignedAt || Date.now()),
         isReattempt: assignment.assignmentType === "reassigned",
         reattemptSource: modeLabel,
       });
@@ -365,44 +382,38 @@ export function ReviewScreen() {
                           </span>
                         </div>
 
-                        <p className="text-xs text-slate-500">
-                          Reassigned on {new Date(item.timestamp).toLocaleString()} · {asg.questionIds.length} {asg.questionIds.length === 1 ? "question" : "questions"}
-                        </p>
+                        {item.status === "cancelled" ? (
+                          <p className="text-xs text-slate-500">
+                            Cancelled {asg.cancelledBy ? `by ${userName(asg.cancelledBy)}` : ""} on {new Date(item.timestamp).toLocaleString()} · {asg.questionIds.length} {asg.questionIds.length === 1 ? "question" : "questions"}
+                          </p>
+                        ) : (
+                          <p className="text-xs text-slate-500">
+                            Reassigned on {new Date(item.timestamp).toLocaleString()} · {asg.questionIds.length} {asg.questionIds.length === 1 ? "question" : "questions"}
+                          </p>
+                        )}
                       </div>
                     </div>
 
                     <div className="flex shrink-0 items-center gap-2">
-                      <Badge color="indigo">Reassigned · Awaiting Agent</Badge>
-                      <button
-                        type="button"
-                        className="flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2 py-1 text-[11px] font-semibold text-red-600 shadow-sm hover:bg-red-50 dark:border-red-800 dark:bg-slate-800 dark:text-red-400 dark:hover:bg-red-950/40"
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          if (!confirm(`Revoke reassignment for ${userName(item.agentId)}? The exam will immediately disappear from the agent's dashboard.`)) return;
-                          try {
-                            await revokeAssignment({
-                              examId: selectedExam,
-                              agentId: item.agentId,
-                              assignmentId: asg.id,
-                              revokedBy: profile?.uid || "auditor",
-                            });
-                            setAssignments((prev) => prev.filter((a) => a.id !== asg.id));
-                            setMessage({
-                              type: "success",
-                              text: `Assignment revoked successfully for ${userName(item.agentId)}.`,
-                            });
-                          } catch (err: any) {
-                            setMessage({
-                              type: "error",
-                              text: err.message || "Failed to revoke assignment.",
-                            });
-                          }
-                        }}
-                        title="Revoke this reassignment"
-                      >
-                        <XCircle className="h-3 w-3" />
-                        Revoke
-                      </button>
+                      {item.status === "cancelled" ? (
+                        <Badge color="slate">Cancelled</Badge>
+                      ) : (
+                        <>
+                          <Badge color="indigo">Reassigned · Awaiting Agent</Badge>
+                          <button
+                            type="button"
+                            className="flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-red-600 shadow-sm hover:bg-red-50 dark:border-red-800 dark:bg-slate-800 dark:text-red-400 dark:hover:bg-red-950/40"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setCancellingAssignment(asg);
+                            }}
+                            title="Cancel this reassignment"
+                          >
+                            <XCircle className="h-3 w-3" />
+                            Cancel Reassignment
+                          </button>
+                        </>
+                      )}
                     </div>
                   </button>
 
@@ -590,6 +601,7 @@ export function ReviewScreen() {
           agentName={userName(reassigningAttempt.agentId)}
           auditorId={profile?.uid ?? "auditor"}
           questionsMap={questionCache}
+          allAttempts={attempts}
           onSuccess={(assignment: ExamAssignment) => {
             const nextAttemptNum = assignment.attemptNumber || (reassigningAttempt.attemptNumber ? reassigningAttempt.attemptNumber + 1 : 2);
             setMessage({
@@ -647,6 +659,122 @@ export function ReviewScreen() {
             setAmendingAttempt(null);
           }}
         />
+      )}
+
+      {/* Cancel Reassignment Modal */}
+      {cancellingAssignment && (
+        <Modal
+          open={!!cancellingAssignment}
+          onClose={() => {
+            if (!isCancelling) {
+              setCancellingAssignment(null);
+              setCancelReason("");
+            }
+          }}
+          title="Cancel Reassignment"
+        >
+          <div className="space-y-4">
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3.5 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200 flex items-start gap-2.5">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
+              <div>
+                <p className="font-semibold mb-0.5">Are you sure you want to cancel this reassignment?</p>
+                <p>
+                  This will immediately cancel reassignment <strong>#{cancellingAssignment.attemptNumber || 2}</strong> for{" "}
+                  <strong>{userName(cancellingAssignment.agentId)}</strong> ({cancellingAssignment.questionIds?.length || 0} questions).
+                  The agent will no longer be able to start or submit this reattempt. Historical attempts and scorecard progress remain intact.
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                Reason for cancellation (optional)
+              </label>
+              <textarea
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder="e.g. Reassigned by mistake, scope needs adjustment..."
+                rows={3}
+                disabled={isCancelling}
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 shadow-sm focus:border-brand-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setCancellingAssignment(null);
+                  setCancelReason("");
+                }}
+                disabled={isCancelling}
+                className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+              >
+                Keep Reassignment
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!cancellingAssignment) return;
+                  setIsCancelling(true);
+                  try {
+                    const { cancelledAssignment } = await cancelReassignment({
+                      assignmentId: cancellingAssignment.id,
+                      cancelledBy: profile?.uid || "auditor",
+                      cancellationReason: cancelReason.trim() || undefined,
+                    });
+
+                    // Update assignments list
+                    setAssignments((prev) =>
+                      prev.map((a) => (a.id === cancelledAssignment.id ? cancelledAssignment : a))
+                    );
+
+                    // Update local permissions on selected exam
+                    if (selectedExamDoc?.reattemptPermissions?.[cancellingAssignment.agentId]) {
+                      const nextPerms = { ...selectedExamDoc.reattemptPermissions };
+                      delete nextPerms[cancellingAssignment.agentId];
+                      setExams((prev) =>
+                        prev.map((e) =>
+                          e.id === selectedExamDoc.id
+                            ? { ...e, reattemptPermissions: nextPerms }
+                            : e
+                        )
+                      );
+                    }
+
+                    setMessage({
+                      type: "success",
+                      text: `Reassignment for ${userName(cancellingAssignment.agentId)} has been cancelled.`,
+                    });
+                    setCancellingAssignment(null);
+                    setCancelReason("");
+                  } catch (err) {
+                    setMessage({
+                      type: "error",
+                      text: err instanceof Error ? err.message : "Failed to cancel reassignment.",
+                    });
+                  } finally {
+                    setIsCancelling(false);
+                  }
+                }}
+                disabled={isCancelling}
+                className="flex items-center gap-1.5 rounded-lg bg-red-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm hover:bg-red-700 disabled:opacity-50"
+              >
+                {isCancelling ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Cancelling...
+                  </>
+                ) : (
+                  <>
+                    <XCircle className="h-3.5 w-3.5" />
+                    Confirm Cancellation
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
 
       {/* Master Scorecard & Attempt Progression Modal */}

@@ -45,11 +45,11 @@ service cloud.firestore {
       allow get: if resource == null
         || (signedIn()
           && resource.data.assignedAgentIds.hasAny([request.auth.uid])
-          && (resource.data.status == "published" || resource.data.status == "active"))
+          && (resource.data.status == "published" || resource.data.status == "active" || resource.data.status == "completed"))
         || isAuditor();
       allow list: if (signedIn()
           && resource.data.assignedAgentIds.hasAny([request.auth.uid])
-          && (resource.data.status == "published" || resource.data.status == "active"))
+          && (resource.data.status == "published" || resource.data.status == "active" || resource.data.status == "completed"))
         || isAuditor();
       allow create: if isAuditor()
         && request.resource.data.createdBy == request.auth.uid;
