@@ -4,12 +4,12 @@ import { getFirestore, initializeFirestore, memoryLocalCache } from "firebase/fi
 import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY || "AIzaSyAtZMQx1rFDqEwSWgnGAeuBFetusxhFwag",
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || "moodle-adf67.firebaseapp.com",
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || "moodle-adf67",
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || "moodle-adf67.firebasestorage.app",
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || "441768017359",
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID || "1:441768017359:web:7be22c0d476ac23d1826ba",
 };
 
 export const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
@@ -22,24 +22,12 @@ export const db = (() => {
   try {
     return initializeFirestore(app, {
       localCache: memoryLocalCache(),
+      ignoreUndefinedProperties: true,
+      experimentalAutoDetectLongPolling: true,
     });
   } catch {
     return getFirestore(app);
   }
 })();
 
-// Clean up any stale IndexedDB databases left behind by legacy persistentMultipleTabManager
-if (typeof window !== "undefined" && window.indexedDB && typeof window.indexedDB.databases === "function") {
-  try {
-    window.indexedDB.databases().then((dbs) => {
-      dbs.forEach((dbInfo) => {
-        if (dbInfo.name && dbInfo.name.startsWith("firestore/")) {
-          try {
-            window.indexedDB.deleteDatabase(dbInfo.name);
-          } catch {}
-        }
-      });
-    }).catch(() => {});
-  } catch {}
-}
 export const storage = getStorage(app);

@@ -24,20 +24,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
+  async function loadProfileWithRetry(user: User, maxAttempts = 3): Promise<AppUser | null> {
+    let lastErr: unknown = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const p = await ensureUserProfile(
+          user.uid,
+          user.email ?? "",
+          user.displayName ?? user.email?.split("@")[0] ?? "User"
+        );
+        return p;
+      } catch (err) {
+        lastErr = err;
+        console.warn(`[AuthContext] loadProfile attempt ${attempt} failed:`, err);
+        if (attempt < maxAttempts) {
+          await new Promise((res) => setTimeout(res, 600 * attempt));
+        }
+      }
+    }
+    throw lastErr;
+  }
+
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
+      if (!user) {
+        setProfile(null);
+        setAuthError(null);
+        setLoading(false);
+        return;
+      }
+
       try {
-        if (user) {
-          const p = await ensureUserProfile(
-            user.uid,
-            user.email ?? "",
-            user.displayName ?? user.email?.split("@")[0] ?? "User"
-          );
-          setProfile(p);
-        } else {
-          setProfile(null);
-        }
+        const p = await loadProfileWithRetry(user);
+        setProfile(p);
         setAuthError(null);
       } catch (error) {
         console.error("Unable to load user profile", error);
@@ -54,6 +74,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => unsub();
   }, []);
 
+  const handleRetry = async () => {
+    setAuthError(null);
+    setLoading(true);
+    const currentUser = auth.currentUser;
+    if (currentUser) {
+      try {
+        const p = await loadProfileWithRetry(currentUser);
+        setProfile(p);
+      } catch (error) {
+        setProfile(null);
+        setAuthError(
+          error instanceof Error
+            ? error.message
+            : "Unable to load your account profile."
+        );
+      } finally {
+        setLoading(false);
+      }
+    } else {
+      window.location.reload();
+    }
+  };
+
   if (authError) {
     return (
       <AuthContext.Provider value={{ firebaseUser, profile: null, loading: false }}>
@@ -64,24 +107,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             <div className="mt-4 flex items-center justify-center gap-2">
               <button
                 className="btn-primary text-xs"
-                onClick={() => {
-                  if (typeof window !== "undefined" && window.indexedDB && typeof window.indexedDB.databases === "function") {
-                    try {
-                      window.indexedDB.databases().then((dbs) => {
-                        dbs.forEach((dbInfo) => {
-                          if (dbInfo.name) {
-                            try {
-                              window.indexedDB.deleteDatabase(dbInfo.name);
-                            } catch {}
-                          }
-                        });
-                      }).catch(() => {});
-                    } catch {}
-                  }
-                  window.location.reload();
-                }}
+                onClick={handleRetry}
               >
-                Clear Cache & Retry
+                Retry
               </button>
               <button
                 className="btn-secondary text-xs"
