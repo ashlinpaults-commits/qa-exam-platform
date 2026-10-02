@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   ArrowDown,
   ArrowRight,
@@ -15,6 +16,7 @@ import {
   X,
   FileDown,
   FileSpreadsheet,
+  Sparkles,
 } from "lucide-react";
 
 import { fetchExams } from "@/lib/exams";
@@ -508,14 +510,24 @@ const coachingCounts = useMemo(
             </p>
           </div>
 
-          <AgentReportGenerator
-            preloadedExams={exams}
-            preloadedAttempts={attempts}
-            preloadedQuestions={questions}
-            preloadedUsers={users}
-            onReportsGenerated={(reports) => setActiveReportData(reports)}
-            buttonLabel="Generate Agent Report"
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              href="/auditor/reports"
+              className="flex items-center gap-1.5 rounded-xl border border-brand-200 bg-white px-3.5 py-2 text-xs font-semibold text-brand-700 shadow-sm hover:bg-brand-50 dark:border-brand-800 dark:bg-slate-900 dark:text-brand-300 dark:hover:bg-brand-950/40"
+            >
+              <Sparkles className="h-3.5 w-3.5 text-brand-600 dark:text-brand-400" />
+              Report 2.0 Workspace
+            </Link>
+
+            <AgentReportGenerator
+              preloadedExams={exams}
+              preloadedAttempts={attempts}
+              preloadedQuestions={questions}
+              preloadedUsers={users}
+              onReportsGenerated={(reports) => setActiveReportData(reports)}
+              buttonLabel="Generate Agent Report (1.0)"
+            />
+          </div>
         </div>
 
         {/* VIEW NAVIGATION TABS */}

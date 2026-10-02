@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, BookOpen, FileText, BarChart3, Users } from "lucide-react";
+import { LayoutDashboard, BookOpen, FileText, BarChart3, Users, FileSpreadsheet } from "lucide-react";
 import { clsx } from "clsx";
 
 import React from "react";
@@ -19,12 +19,16 @@ const LINKS: NavItem[] = [
   { href: "/auditor/questions", label: "Question Bank", icon: BookOpen },
   { href: "/auditor/exams", label: "Exams", icon: FileText },
   { href: "/auditor/analytics", label: "Analytics", icon: BarChart3 },
+  { href: "/auditor/reports", label: "Reports", icon: FileSpreadsheet },
   { href: "/auditor/admin", label: "Users", icon: Users },
 ];
 
 function isRouteActive(currentPath: string, targetHref: string): boolean {
+  if (targetHref === "/auditor/reports") {
+    return currentPath.startsWith("/auditor/reports");
+  }
   if (targetHref === "/auditor/analytics") {
-    return currentPath.startsWith("/auditor/analytics") || currentPath.startsWith("/auditor/reports");
+    return currentPath.startsWith("/auditor/analytics");
   }
   return currentPath.startsWith(targetHref);
 }
