@@ -32,6 +32,11 @@ export default function LoginPage() {
           cred.user.email ?? email,
           cred.user.displayName ?? email.split("@")[0]
         );
+        if (profile.isActive === false || profile.status === "inactive") {
+          await auth.signOut();
+          setError("This account has been deactivated by an administrator. Please contact your QA auditor.");
+          return;
+        }
         router.push(profile.role === "auditor" ? "/auditor/dashboard" : "/agent/dashboard");
       } else {
         const cred = await createUserWithEmailAndPassword(auth, email, password);

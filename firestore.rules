@@ -16,17 +16,21 @@ service cloud.firestore {
       return signedIn() && request.auth.uid == uid;
     }
 
-    // User-created profiles can only bootstrap as agents.  A client cannot
+    // User-created profiles can only bootstrap as agents. A client cannot
     // grant itself auditor access or change its identity fields.
+    // Auditors can manage users, update role/status/metadata, or create new users.
     match /users/{uid} {
       allow get: if isOwnUser(uid) || isAuditor();
       allow list: if isAuditor();
-      allow create: if isOwnUser(uid)
+      allow create: if (isOwnUser(uid)
         && request.resource.data.uid == uid
-        && request.resource.data.role == "agent";
+        && request.resource.data.role == "agent")
+        || isAuditor();
       allow update: if isAuditor()
         && request.resource.data.uid == resource.data.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["role"]);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "role", "isActive", "status", "name", "streamId", "batch", "updatedAt"
+        ]);
       allow delete: if false;
     }
 
@@ -139,6 +143,20 @@ service cloud.firestore {
     // Agents are completely denied read and write access.
     match /aiReviews/{attemptId} {
       allow read, write: if isAuditor();
+    }
+
+    // Application settings:
+    // Strictly confidential and controlled. Accessible ONLY by auditors.
+    match /settings/{settingId} {
+      allow read, write: if isAuditor();
+    }
+
+    // Audit logs collection:
+    // Tracks administrative and security actions.
+    // Immutable audit trail: only auditors can view and append; updates and deletes are denied.
+    match /audit_logs/{logId} {
+      allow read, create: if isAuditor();
+      allow update, delete: if false;
     }
 
     // Any future collection is deny-by-default until it has an explicit

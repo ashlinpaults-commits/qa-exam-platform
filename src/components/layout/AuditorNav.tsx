@@ -20,7 +20,7 @@ const LINKS: NavItem[] = [
   { href: "/auditor/exams", label: "Exams", icon: FileText },
   { href: "/auditor/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/auditor/reports", label: "Reports", icon: FileSpreadsheet },
-  { href: "/auditor/admin", label: "Users", icon: Users },
+  { href: "/auditor/admin", label: "Administration", icon: Users },
 ];
 
 function isRouteActive(currentPath: string, targetHref: string): boolean {
@@ -29,6 +29,9 @@ function isRouteActive(currentPath: string, targetHref: string): boolean {
   }
   if (targetHref === "/auditor/analytics") {
     return currentPath.startsWith("/auditor/analytics");
+  }
+  if (targetHref === "/auditor/admin") {
+    return currentPath.startsWith("/auditor/admin") || currentPath.startsWith("/auditor/settings");
   }
   return currentPath.startsWith(targetHref);
 }

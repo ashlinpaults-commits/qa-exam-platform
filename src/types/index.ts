@@ -9,7 +9,11 @@ export interface AppUser {
   streamId?: string;
   batch?: string;
   assignedTrainerId?: string;
+  isActive?: boolean;
+  status?: "active" | "inactive";
   createdAt: number;
+  updatedAt?: number;
+  lastLoginAt?: number;
 }
 
 export type QuestionType =
@@ -231,17 +235,36 @@ export type AuditAction =
   | "review_finalized"
   | "report_viewed"
   | "report_queued"
-  | "user_role_changed";
+  | "user_role_changed"
+  | "user_created"
+  | "user_updated"
+  | "user_deactivated"
+  | "user_reactivated"
+  | "settings_updated"
+  | "SETTINGS_UPDATED"
+  | "USER_CREATED"
+  | "USER_UPDATED"
+  | "USER_DEACTIVATED"
+  | "USER_REACTIVATED"
+  | "USER_ROLE_CHANGED";
+
+export type AuditActionType = AuditAction;
 
 export interface AuditLogEntry {
-  id: string;
+  id?: string;
   action: AuditAction;
   actorId: string;
-  entityType: "stream" | "batch" | "exam" | "attempt" | "report" | "user";
-  entityId: string;
-  summary: string;
+  actorEmail?: string;
+  actorName?: string;
+  targetId?: string;
+  targetName?: string;
+  entityType?: "stream" | "batch" | "exam" | "attempt" | "report" | "user" | "settings";
+  entityId?: string;
+  summary?: string;
+  details?: Record<string, unknown>;
   metadata?: Record<string, string | number | boolean | null>;
-  createdAt: number;
+  timestamp?: number;
+  createdAt?: number;
 }
 
 /* =========================================================
@@ -540,3 +563,37 @@ export interface ExamMasterScorecard {
   progression: AttemptProgressionStep[];
   questionMastery: QuestionMasteryRecord[];
 }
+
+/* =========================================================
+   APPLICATION SETTINGS & AUDIT LOGS
+   ========================================================= */
+
+export interface AppSettings {
+  // General Settings
+  appName: string;
+  supportContactEmail?: string;
+
+  // Exam Defaults
+  defaultExamDuration: number; // In minutes: 1 - 600
+  defaultPassingScore: number; // In percentage: 0 - 100
+  allowAgentReattempts: boolean;
+  defaultReassignmentMode: "full_exam" | "incorrect_only";
+
+  // Notifications
+  enableEmailNotifications: boolean;
+  notificationEmail?: string;
+
+  // Reports
+  defaultReportWindowDays: number; // 1 - 365
+  requireAmendmentReason: boolean;
+
+  // System & Maintenance
+  maintenanceMode: boolean;
+  maintenanceMessage?: string;
+
+  // Audit metadata
+  updatedAt?: number;
+  updatedBy?: string;
+  updatedByName?: string;
+}
+
