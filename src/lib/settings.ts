@@ -9,7 +9,7 @@ import {
   orderBy,
   limit,
 } from "firebase/firestore";
-import { db } from "./firebase";
+import { db, auth } from "./firebase";
 import { stripUndefined } from "./questions";
 import type { AppSettings, AuditLogEntry, AuditActionType } from "@/types";
 
@@ -163,8 +163,20 @@ export async function getAppSettings(): Promise<AppSettings> {
         ...data,
       };
     }
-  } catch (err) {
-    console.warn("[settings] Failed to fetch settings from Firestore:", err);
+  } catch (err: any) {
+    console.warn("[settings] Failed to fetch settings from Firestore SDK, trying API fallback:", err?.message);
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      if (idToken) {
+        const res = await fetch("/api/admin/settings", {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.settings) return data.settings;
+        }
+      }
+    } catch {}
   }
   return { ...DEFAULT_APP_SETTINGS };
 }
@@ -179,6 +191,7 @@ export interface ActorInfo {
  * Updates application settings in Firestore.
  * Validates updates, prevents arbitrary field injection, maintains undefined-safety,
  * and records an immutable audit log entry.
+ * Includes server API fallback if client SDK experiences permissions or network lag.
  */
 export async function updateAppSettings(
   updates: Partial<AppSettings>,
@@ -222,7 +235,32 @@ export async function updateAppSettings(
     updatedByName: actor.name || actor.email.split("@")[0],
   });
 
-  await setDoc(SETTINGS_DOC_REF(), payloadToPersist, { merge: true });
+  try {
+    await setDoc(SETTINGS_DOC_REF(), payloadToPersist, { merge: true });
+  } catch (clientErr: any) {
+    console.warn("[settings] Direct client setDoc failed, attempting server API fallback:", clientErr?.message);
+    const idToken = await auth.currentUser?.getIdToken();
+    if (!idToken) {
+      throw clientErr;
+    }
+
+    const apiRes = await fetch("/api/admin/settings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify(sanitizedPatch),
+    });
+
+    if (!apiRes.ok) {
+      const errData = await apiRes.json().catch(() => ({}));
+      throw new Error(errData?.error || clientErr?.message || "Failed to save settings.");
+    }
+
+    const resJson = await apiRes.json();
+    return resJson.settings;
+  }
 
   // Record audit log entry
   const changedKeys = Object.keys(sanitizedPatch);
